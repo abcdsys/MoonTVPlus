@@ -796,8 +796,8 @@ export abstract class BaseRedisStorage implements IStorage {
 
   // 获取用户列表（分页，新版本）
   async getUserListV2(
-    offset: number = 0,
-    limit: number = 20,
+    offset = 0,
+    limit = 20,
     ownerUsername?: string
   ): Promise<{
     users: Array<{
@@ -1272,6 +1272,16 @@ export abstract class BaseRedisStorage implements IStorage {
   ): Promise<void> {
     await this.withRetry(() =>
       this.adapter.set(this.lastFavoriteCheckKey(userName), timestamp.toString())
+    );
+  }
+
+  async updateLastMovieRequestTime(userName: string, timestamp: number): Promise<void> {
+    await this.withRetry(() =>
+      this.adapter.hSet(
+        this.userInfoKey(userName),
+        'last_movie_request_time',
+        timestamp.toString()
+      )
     );
   }
 
