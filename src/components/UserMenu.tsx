@@ -19,18 +19,22 @@ import {
   LogOut,
   Mail,
   MessageSquare,
+  Monitor,
   MoveDown,
   MoveUp,
+  Package,
   Rss,
   Settings,
   Shield,
   Sliders,
+  Smartphone,
   Star,
+  Tablet,
   User,
   X,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
@@ -38,11 +42,11 @@ import { clearAllDanmakuCache } from '@/lib/danmaku/api';
 import { CURRENT_VERSION } from '@/lib/version';
 import { UpdateStatus } from '@/lib/version_check';
 
+import { FavoritesPanel } from './FavoritesPanel';
+import { NotificationPanel } from './NotificationPanel';
+import { OfflineDownloadPanel } from './OfflineDownloadPanel';
 import { useVersionCheck } from './VersionCheckProvider';
 import { VersionPanel } from './VersionPanel';
-import { OfflineDownloadPanel } from './OfflineDownloadPanel';
-import { NotificationPanel } from './NotificationPanel';
-import { FavoritesPanel } from './FavoritesPanel';
 
 interface AuthInfo {
   username?: string;
@@ -61,6 +65,8 @@ export const UserMenu: React.FC = () => {
   const [isNotificationPanelOpen, setIsNotificationPanelOpen] = useState(false);
   const [isFavoritesPanelOpen, setIsFavoritesPanelOpen] = useState(false);
   const [isEmailSettingsOpen, setIsEmailSettingsOpen] = useState(false);
+  const [isDeviceManagementOpen, setIsDeviceManagementOpen] = useState(false);
+  const [isEcoAppsOpen, setIsEcoAppsOpen] = useState(false);
   const [authInfo, setAuthInfo] = useState<AuthInfo | null>(null);
   const [storageType, setStorageType] = useState<string>('localstorage');
   const [mounted, setMounted] = useState(false);
@@ -74,7 +80,7 @@ export const UserMenu: React.FC = () => {
 
   // Body 滚动锁定 - 使用 overflow 方式避免布局问题
   useEffect(() => {
-    if (isSettingsOpen || isChangePasswordOpen || isSubscribeOpen || isOfflineDownloadPanelOpen || isEmailSettingsOpen) {
+    if (isSettingsOpen || isChangePasswordOpen || isSubscribeOpen || isOfflineDownloadPanelOpen || isEmailSettingsOpen || isDeviceManagementOpen || isEcoAppsOpen) {
       const body = document.body;
       const html = document.documentElement;
 
@@ -93,7 +99,7 @@ export const UserMenu: React.FC = () => {
         html.style.overflow = originalHtmlOverflow;
       };
     }
-  }, [isSettingsOpen, isChangePasswordOpen, isSubscribeOpen, isOfflineDownloadPanelOpen, isEmailSettingsOpen]);
+  }, [isSettingsOpen, isChangePasswordOpen, isSubscribeOpen, isOfflineDownloadPanelOpen, isEmailSettingsOpen, isDeviceManagementOpen, isEcoAppsOpen]);
 
   // 设置相关状态
   const [defaultAggregateSearch, setDefaultAggregateSearch] = useState(true);
@@ -113,13 +119,35 @@ export const UserMenu: React.FC = () => {
   const [bufferStrategy, setBufferStrategy] = useState('medium');
   const [nextEpisodePreCache, setNextEpisodePreCache] = useState(true);
   const [nextEpisodeDanmakuPreload, setNextEpisodeDanmakuPreload] = useState(true);
+  const [disableAutoLoadDanmaku, setDisableAutoLoadDanmaku] = useState(false);
+  const [danmakuMaxCount, setDanmakuMaxCount] = useState(0);
+  const [danmakuHeatmapDisabled, setDanmakuHeatmapDisabled] = useState(false);
   const [searchTraditionalToSimplified, setSearchTraditionalToSimplified] = useState(false);
+  const [exactSearch, setExactSearch] = useState(true);
 
   // 邮件通知设置
   const [userEmail, setUserEmail] = useState('');
   const [emailNotifications, setEmailNotifications] = useState(false);
   const [emailSettingsLoading, setEmailSettingsLoading] = useState(false);
   const [emailSettingsSaving, setEmailSettingsSaving] = useState(false);
+
+  // 设备管理状态
+  const [devices, setDevices] = useState<any[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [revoking, setRevoking] = useState<string | null>(null);
+
+  // 确认对话框状态
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
 
   // 折叠面板状态
   const [isDoubanSectionOpen, setIsDoubanSectionOpen] = useState(true);
@@ -149,6 +177,8 @@ export const UserMenu: React.FC = () => {
   ];
 
   const [homeModules, setHomeModules] = useState<HomeModule[]>(defaultHomeModules);
+  const [homeBannerEnabled, setHomeBannerEnabled] = useState(true);
+  const [homeContinueWatchingEnabled, setHomeContinueWatchingEnabled] = useState(true);
 
   // 豆瓣数据源选项
   const doubanDataSourceOptions = [
@@ -272,10 +302,11 @@ export const UserMenu: React.FC = () => {
   }, []);
 
   // 懒加载订阅 URL - 只在打开订阅面板时请求
-  const fetchSubscribeUrl = async () => {
+  const fetchSubscribeUrl = async (adFilter?: boolean) => {
     try {
       const currentOrigin = window.location.origin;
-      const response = await fetch(`/api/tvbox/config?origin=${encodeURIComponent(currentOrigin)}&adFilter=${adFilterEnabled}`);
+      const filterValue = adFilter !== undefined ? adFilter : adFilterEnabled;
+      const response = await fetch(`/api/tvbox/config?origin=${encodeURIComponent(currentOrigin)}&adFilter=${filterValue}`);
       if (response.ok) {
         const data = await response.json();
         setSubscribeUrl(data.url);
@@ -402,6 +433,31 @@ export const UserMenu: React.FC = () => {
         setNextEpisodeDanmakuPreload(savedNextEpisodeDanmakuPreload === 'true');
       }
 
+      const savedDisableAutoLoadDanmaku = localStorage.getItem('disableAutoLoadDanmaku');
+      if (savedDisableAutoLoadDanmaku !== null) {
+        setDisableAutoLoadDanmaku(savedDisableAutoLoadDanmaku === 'true');
+      }
+
+      const savedDanmakuMaxCount = localStorage.getItem('danmakuMaxCount');
+      if (savedDanmakuMaxCount !== null) {
+        setDanmakuMaxCount(parseInt(savedDanmakuMaxCount, 10));
+      }
+
+      const savedDanmakuHeatmapDisabled = localStorage.getItem('danmaku_heatmap_disabled');
+      if (savedDanmakuHeatmapDisabled !== null) {
+        setDanmakuHeatmapDisabled(savedDanmakuHeatmapDisabled === 'true');
+      }
+
+      const savedHomeBannerEnabled = localStorage.getItem('homeBannerEnabled');
+      if (savedHomeBannerEnabled !== null) {
+        setHomeBannerEnabled(savedHomeBannerEnabled === 'true');
+      }
+
+      const savedHomeContinueWatchingEnabled = localStorage.getItem('homeContinueWatchingEnabled');
+      if (savedHomeContinueWatchingEnabled !== null) {
+        setHomeContinueWatchingEnabled(savedHomeContinueWatchingEnabled === 'true');
+      }
+
       // 加载首页模块配置
       const savedHomeModules = localStorage.getItem('homeModules');
       if (savedHomeModules !== null) {
@@ -416,6 +472,12 @@ export const UserMenu: React.FC = () => {
       const savedSearchTraditionalToSimplified = localStorage.getItem('searchTraditionalToSimplified');
       if (savedSearchTraditionalToSimplified !== null) {
         setSearchTraditionalToSimplified(savedSearchTraditionalToSimplified === 'true');
+      }
+
+      // 加载精确搜索设置
+      const savedExactSearch = localStorage.getItem('exactSearch');
+      if (savedExactSearch !== null) {
+        setExactSearch(savedExactSearch === 'true');
       }
     }
   }, []);
@@ -479,6 +541,96 @@ export const UserMenu: React.FC = () => {
     } finally {
       setEmailSettingsSaving(false);
     }
+  };
+
+  // 加载设备列表
+  const loadDevices = async () => {
+    setDevicesLoading(true);
+    try {
+      const response = await fetch('/api/auth/devices');
+      if (response.ok) {
+        const data = await response.json();
+        setDevices(data.devices || []);
+      }
+    } catch (error) {
+      console.error('加载设备列表失败:', error);
+    } finally {
+      setDevicesLoading(false);
+    }
+  };
+
+  // 撤销单个设备
+  const handleRevokeDevice = async (tokenId: string) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: '撤销设备登录',
+      message: '确定要撤销该设备的登录吗？',
+      onConfirm: async () => {
+        setConfirmDialog({ ...confirmDialog, isOpen: false });
+        setRevoking(tokenId);
+        try {
+          const response = await fetch('/api/auth/devices', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tokenId }),
+          });
+
+          if (response.ok) {
+            // 重新加载设备列表
+            await loadDevices();
+          } else {
+            alert('撤销失败，请重试');
+          }
+        } catch (error) {
+          console.error('撤销设备失败:', error);
+          alert('撤销失败，请重试');
+        } finally {
+          setRevoking(null);
+        }
+      },
+    });
+  };
+
+  // 撤销所有设备
+  const handleRevokeAllDevices = async () => {
+    setConfirmDialog({
+      isOpen: true,
+      title: '登出所有设备',
+      message: '确定要登出所有设备吗？这将清除所有设备的登录状态（包括当前设备）。',
+      onConfirm: async () => {
+        setConfirmDialog({ ...confirmDialog, isOpen: false });
+        try {
+          const response = await fetch('/api/auth/devices', {
+            method: 'POST',
+          });
+
+          if (response.ok) {
+            // 登出所有设备后，重定向到首页
+            window.location.href = '/';
+          } else {
+            alert('操作失败，请重试');
+          }
+        } catch (error) {
+          console.error('登出所有设备失败:', error);
+          alert('操作失败，请重试');
+        }
+      },
+    });
+  };
+
+  // 根据设备类型返回对应的图标
+  const getDeviceIcon = (deviceInfo: string) => {
+    const info = deviceInfo.toLowerCase();
+
+    if (info.includes('mobile') || info.includes('iphone') || info.includes('android')) {
+      return Smartphone;
+    }
+
+    if (info.includes('tablet') || info.includes('ipad')) {
+      return Tablet;
+    }
+
+    return Monitor;
   };
 
   // 点击外部区域关闭下拉框
@@ -570,8 +722,8 @@ export const UserMenu: React.FC = () => {
 
   const handleAdFilterToggle = async (checked: boolean) => {
     setAdFilterEnabled(checked);
-    // 当去广告开关改变时,重新获取订阅URL
-    await fetchSubscribeUrl();
+    // 当去广告开关改变时,重新获取订阅URL，传入新的值
+    await fetchSubscribeUrl(checked);
   };
 
   const handleCopySubscribeUrl = async () => {
@@ -758,10 +910,54 @@ export const UserMenu: React.FC = () => {
     }
   };
 
+  const handleDisableAutoLoadDanmakuToggle = (value: boolean) => {
+    setDisableAutoLoadDanmaku(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('disableAutoLoadDanmaku', String(value));
+    }
+  };
+
+  const handleDanmakuMaxCountChange = (value: number) => {
+    setDanmakuMaxCount(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('danmakuMaxCount', String(value));
+    }
+  };
+
+  const handleDanmakuHeatmapDisabledToggle = (value: boolean) => {
+    setDanmakuHeatmapDisabled(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('danmaku_heatmap_disabled', String(value));
+    }
+  };
+
   const handleSearchTraditionalToSimplifiedToggle = (value: boolean) => {
     setSearchTraditionalToSimplified(value);
     if (typeof window !== 'undefined') {
       localStorage.setItem('searchTraditionalToSimplified', String(value));
+    }
+  };
+
+  const handleExactSearchToggle = (value: boolean) => {
+    setExactSearch(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('exactSearch', String(value));
+    }
+  };
+
+  const handleHomeBannerToggle = (value: boolean) => {
+    setHomeBannerEnabled(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('homeBannerEnabled', String(value));
+      window.dispatchEvent(new CustomEvent('homeModulesUpdated'));
+    }
+  };
+
+  const handleHomeContinueWatchingToggle = (value: boolean) => {
+    setHomeContinueWatchingEnabled(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('homeContinueWatchingEnabled', String(value));
+      window.dispatchEvent(new CustomEvent('homeModulesUpdated'));
     }
   };
 
@@ -857,6 +1053,9 @@ export const UserMenu: React.FC = () => {
     setBufferStrategy('medium');
     setNextEpisodePreCache(true);
     setNextEpisodeDanmakuPreload(true);
+    setDisableAutoLoadDanmaku(false);
+    setHomeBannerEnabled(true);
+    setHomeContinueWatchingEnabled(true);
     setHomeModules(defaultHomeModules);
     setSearchTraditionalToSimplified(false);
 
@@ -875,6 +1074,11 @@ export const UserMenu: React.FC = () => {
       localStorage.setItem('bufferStrategy', 'medium');
       localStorage.setItem('nextEpisodePreCache', 'true');
       localStorage.setItem('nextEpisodeDanmakuPreload', 'true');
+      localStorage.setItem('disableAutoLoadDanmaku', 'false');
+      localStorage.setItem('danmakuMaxCount', '0');
+      localStorage.setItem('danmaku_heatmap_disabled', 'false');
+      localStorage.setItem('homeBannerEnabled', 'true');
+      localStorage.setItem('homeContinueWatchingEnabled', 'true');
       localStorage.setItem('homeModules', JSON.stringify(defaultHomeModules));
       localStorage.setItem('searchTraditionalToSimplified', 'false');
       window.dispatchEvent(new CustomEvent('homeModulesUpdated'));
@@ -910,7 +1114,8 @@ export const UserMenu: React.FC = () => {
 
   // 检查是否显示管理面板按钮
   const showAdminPanel =
-    authInfo?.role === 'owner' || authInfo?.role === 'admin';
+    (authInfo?.role === 'owner' || authInfo?.role === 'admin') &&
+    storageType !== 'localstorage';
 
   // 检查是否显示离线下载按钮
   const showOfflineDownload =
@@ -951,7 +1156,7 @@ export const UserMenu: React.FC = () => {
         <div className='px-3 py-2.5 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-gray-50 to-gray-100/50 dark:from-gray-800 dark:to-gray-800/50'>
           <div className='space-y-1'>
             <div className='flex items-center justify-between'>
-              <div className='flex items-center gap-1.5'>
+              <div className='flex items-center gap-0.5'>
                 <span className='text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
                   当前用户
                 </span>
@@ -969,6 +1174,22 @@ export const UserMenu: React.FC = () => {
                 >
                   <Mail className='w-3 h-3 text-gray-500 dark:text-gray-400' />
                 </button>
+                {/* 设备管理图标按钮 */}
+                {storageType !== 'localstorage' && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsOpen(false);
+                      setIsDeviceManagementOpen(true);
+                      // 懒加载:打开面板时才请求设备列表
+                      loadDevices();
+                    }}
+                    className='p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors'
+                    title='设备管理'
+                  >
+                    <Monitor className='w-3 h-3 text-gray-500 dark:text-gray-400' />
+                  </button>
+                )}
               </div>
               <span
                 className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium ${(authInfo?.role || 'user') === 'owner'
@@ -1079,6 +1300,18 @@ export const UserMenu: React.FC = () => {
               <span className='font-medium'>订阅</span>
             </button>
           )}
+
+          {/* 生态应用按钮 */}
+          <button
+            onClick={() => {
+              setIsOpen(false);
+              setIsEcoAppsOpen(true);
+            }}
+            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-sm'
+          >
+            <Package className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+            <span className='font-medium'>生态应用</span>
+          </button>
 
           {/* 分割线 */}
           <div className='my-1 border-t border-gray-200 dark:border-gray-700'></div>
@@ -1680,6 +1913,30 @@ export const UserMenu: React.FC = () => {
                       </div>
                     </label>
                   </div>
+
+                  {/* 精确搜索 */}
+                  <div className='flex items-center justify-between'>
+                    <div>
+                      <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                        精确搜索
+                      </h4>
+                      <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                        开启后，搜索结果将过滤掉不包含搜索词的内容
+                      </p>
+                    </div>
+                    <label className='flex items-center cursor-pointer'>
+                      <div className='relative'>
+                        <input
+                          type='checkbox'
+                          className='sr-only peer'
+                          checked={exactSearch}
+                          onChange={(e) => handleExactSearchToggle(e.target.checked)}
+                        />
+                        <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                        <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+                      </div>
+                    </label>
+                  </div>
                 </div>
               )}
             </div>
@@ -1814,6 +2071,30 @@ export const UserMenu: React.FC = () => {
               </button>
               {isDanmakuSectionOpen && (
                 <div className='p-3 md:p-4 space-y-4 md:space-y-6'>
+                  {/* 禁用自动装填弹幕 */}
+                  <div className='flex items-center justify-between'>
+                    <div>
+                      <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                        禁用自动装填弹幕
+                      </h4>
+                      <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                        开启后，播放页面不会自动匹配弹幕，只能手动匹配
+                      </p>
+                    </div>
+                    <label className='flex items-center cursor-pointer'>
+                      <div className='relative'>
+                        <input
+                          type='checkbox'
+                          className='sr-only peer'
+                          checked={disableAutoLoadDanmaku}
+                          onChange={(e) => handleDisableAutoLoadDanmakuToggle(e.target.checked)}
+                        />
+                        <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                        <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+                      </div>
+                    </label>
+                  </div>
+
                   {/* 下集弹幕预加载 */}
                   <div className='flex items-center justify-between'>
                     <div>
@@ -1836,6 +2117,89 @@ export const UserMenu: React.FC = () => {
                         <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
                       </div>
                     </label>
+                  </div>
+
+                  {/* 禁用弹幕热力图 */}
+                  <div className='flex items-center justify-between'>
+                    <div>
+                      <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                        禁用弹幕热力图
+                      </h4>
+                      <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                        开启后不显示弹幕热力图和热力图开关
+                      </p>
+                    </div>
+                    <label className='flex items-center cursor-pointer'>
+                      <div className='relative'>
+                        <input
+                          type='checkbox'
+                          className='sr-only peer'
+                          checked={danmakuHeatmapDisabled}
+                          onChange={(e) => handleDanmakuHeatmapDisabledToggle(e.target.checked)}
+                        />
+                        <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                        <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+                      </div>
+                    </label>
+                  </div>
+
+                  {/* 弹幕加载上限 */}
+                  <div className='space-y-2'>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-xs text-gray-600 dark:text-gray-400'>
+                        弹幕加载上限
+                      </span>
+                      <span className='text-xs font-medium text-gray-700 dark:text-gray-300'>
+                        {danmakuMaxCount === 0 ? '无上限' : `${danmakuMaxCount} 条`}
+                      </span>
+                    </div>
+                    <div className='flex items-center gap-2'>
+                      <input
+                        type='range'
+                        min='0'
+                        max='10000'
+                        step='100'
+                        value={danmakuMaxCount}
+                        onChange={(e) => handleDanmakuMaxCountChange(parseInt(e.target.value))}
+                        className='flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700'
+                        style={{
+                          background: `linear-gradient(to right, #10b981 0%, #10b981 ${(danmakuMaxCount / 10000) * 100}%, #e5e7eb ${(danmakuMaxCount / 10000) * 100}%, #e5e7eb 100%)`
+                        }}
+                      />
+                    </div>
+                    <div className='relative text-xs text-gray-500 dark:text-gray-400' style={{ height: '24px' }}>
+                      <button
+                        onClick={() => handleDanmakuMaxCountChange(0)}
+                        className={`absolute px-2 py-0.5 rounded ${danmakuMaxCount === 0 ? 'bg-green-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                        style={{ left: '0%', transform: 'translateX(0%)' }}
+                      >
+                        无上限
+                      </button>
+                      <button
+                        onClick={() => handleDanmakuMaxCountChange(3000)}
+                        className={`absolute px-2 py-0.5 rounded ${danmakuMaxCount === 3000 ? 'bg-green-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                        style={{ left: '30%', transform: 'translateX(-50%)' }}
+                      >
+                        3000
+                      </button>
+                      <button
+                        onClick={() => handleDanmakuMaxCountChange(5000)}
+                        className={`absolute px-2 py-0.5 rounded ${danmakuMaxCount === 5000 ? 'bg-green-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                        style={{ left: '50%', transform: 'translateX(-50%)' }}
+                      >
+                        5000
+                      </button>
+                      <button
+                        onClick={() => handleDanmakuMaxCountChange(10000)}
+                        className={`absolute px-2 py-0.5 rounded ${danmakuMaxCount === 10000 ? 'bg-green-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                        style={{ left: '100%', transform: 'translateX(-100%)' }}
+                      >
+                        10000
+                      </button>
+                    </div>
+                    <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                      限制加载的弹幕数量，减少性能消耗
+                    </p>
                   </div>
 
                   {/* 清除弹幕缓存 */}
@@ -1909,6 +2273,55 @@ export const UserMenu: React.FC = () => {
                     </p>
                   </div>
 
+                  {/* 首页顶部组件显示 */}
+                  <div className='space-y-2'>
+                    <div className='flex items-center gap-2 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700'>
+                      <button
+                        onClick={() => handleHomeBannerToggle(!homeBannerEnabled)}
+                        className='flex-shrink-0'
+                        title={homeBannerEnabled ? '点击隐藏' : '点击显示'}
+                      >
+                        {homeBannerEnabled ? (
+                          <Eye className='w-5 h-5 text-green-600 dark:text-green-400' />
+                        ) : (
+                          <EyeOff className='w-5 h-5 text-gray-400 dark:text-gray-500' />
+                        )}
+                      </button>
+                      <div className='flex-1'>
+                        <span className={`text-sm font-medium ${
+                          homeBannerEnabled
+                            ? 'text-gray-900 dark:text-gray-100'
+                            : 'text-gray-400 dark:text-gray-500'
+                        }`}>
+                          首页轮播图
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className='flex items-center gap-2 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700'>
+                      <button
+                        onClick={() => handleHomeContinueWatchingToggle(!homeContinueWatchingEnabled)}
+                        className='flex-shrink-0'
+                        title={homeContinueWatchingEnabled ? '点击隐藏' : '点击显示'}
+                      >
+                        {homeContinueWatchingEnabled ? (
+                          <Eye className='w-5 h-5 text-green-600 dark:text-green-400' />
+                        ) : (
+                          <EyeOff className='w-5 h-5 text-gray-400 dark:text-gray-500' />
+                        )}
+                      </button>
+                      <div className='flex-1'>
+                        <span className={`text-sm font-medium ${
+                          homeContinueWatchingEnabled
+                            ? 'text-gray-900 dark:text-gray-100'
+                            : 'text-gray-400 dark:text-gray-500'
+                        }`}>
+                          继续观看
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* 模块列表 */}
                   <div className='space-y-2'>
                     {homeModules.map((module, index) => (
@@ -1967,8 +2380,12 @@ export const UserMenu: React.FC = () => {
                   <button
                     onClick={() => {
                       setHomeModules(defaultHomeModules);
+                      setHomeBannerEnabled(true);
+                      setHomeContinueWatchingEnabled(true);
                       if (typeof window !== 'undefined') {
                         localStorage.setItem('homeModules', JSON.stringify(defaultHomeModules));
+                        localStorage.setItem('homeBannerEnabled', 'true');
+                        localStorage.setItem('homeContinueWatchingEnabled', 'true');
                         window.dispatchEvent(new CustomEvent('homeModulesUpdated'));
                       }
                     }}
@@ -2357,6 +2774,331 @@ export const UserMenu: React.FC = () => {
     </>
   );
 
+  // 设备管理面板内容
+  const deviceManagementPanel = (
+    <>
+      {/* 背景遮罩 */}
+      <div
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-[1000]'
+        onClick={() => setIsDeviceManagementOpen(false)}
+        onTouchMove={(e) => {
+          e.preventDefault();
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+        }}
+        style={{
+          touchAction: 'none',
+        }}
+      />
+
+      {/* 设备管理面板 */}
+      <div
+        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-white dark:bg-gray-900 rounded-xl shadow-xl z-[1001] overflow-hidden'
+      >
+        <div
+          className='h-full max-h-[80vh] flex flex-col'
+          data-panel-content
+          onTouchMove={(e) => {
+            e.stopPropagation();
+          }}
+          style={{
+            touchAction: 'auto',
+          }}
+        >
+          {/* 标题栏 */}
+          <div className='flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700'>
+            <h3 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
+              设备管理
+            </h3>
+            <button
+              onClick={() => setIsDeviceManagementOpen(false)}
+              className='w-8 h-8 p-1 rounded-full flex items-center justify-center text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors'
+              aria-label='Close'
+            >
+              <X className='w-full h-full' />
+            </button>
+          </div>
+
+          {/* 设备列表 */}
+          <div className='flex-1 overflow-y-auto p-6'>
+            {devicesLoading ? (
+              <div className='space-y-3'>
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className='animate-pulse'>
+                    <div className='h-20 bg-gray-200 dark:bg-gray-700 rounded-lg'></div>
+                  </div>
+                ))}
+                <div className='text-center text-sm text-gray-500 dark:text-gray-400 mt-4'>
+                  加载中...
+                </div>
+              </div>
+            ) : devices.length === 0 ? (
+              <div className='text-center py-8'>
+                <Monitor className='w-12 h-12 mx-auto text-gray-400 dark:text-gray-500 mb-3' />
+                <p className='text-sm text-gray-500 dark:text-gray-400'>暂无登录设备</p>
+              </div>
+            ) : (
+              <div className='space-y-3'>
+                {devices
+                  .sort((a, b) => {
+                    // 当前设备置顶
+                    if (a.isCurrent && !b.isCurrent) return -1;
+                    if (!a.isCurrent && b.isCurrent) return 1;
+                    return 0;
+                  })
+                  .map((device) => {
+                  const DeviceIcon = getDeviceIcon(device.deviceInfo);
+                  return (
+                    <div
+                      key={device.tokenId}
+                      className={`p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border ${
+                        device.isCurrent
+                          ? 'border-yellow-400 dark:border-yellow-500'
+                          : 'border-gray-200 dark:border-gray-700'
+                      }`}
+                    >
+                      <div className='flex items-start justify-between'>
+                        <div className='flex-1'>
+                          <div className='flex items-center gap-2 mb-2'>
+                            <DeviceIcon className='w-4 h-4 text-gray-600 dark:text-gray-400' />
+                            <span className='text-sm font-medium text-gray-900 dark:text-gray-100'>
+                              {device.deviceInfo}
+                            </span>
+                            {device.isCurrent && (
+                              <span className='px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300 rounded-full'>
+                                当前设备
+                              </span>
+                            )}
+                          </div>
+                          <div className='space-y-1 text-xs text-gray-500 dark:text-gray-400'>
+                            <div>登录时间: {new Date(device.createdAt).toLocaleString('zh-CN')}</div>
+                            <div>最后活跃: {new Date(device.lastUsed).toLocaleString('zh-CN')}</div>
+                          </div>
+                        </div>
+                        {!device.isCurrent && (
+                          <button
+                            onClick={() => handleRevokeDevice(device.tokenId)}
+                            disabled={revoking === device.tokenId}
+                            className='ml-3 px-3 py-1.5 text-xs font-medium text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 border border-red-200 hover:border-red-300 dark:border-red-800 dark:hover:border-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
+                          >
+                            {revoking === device.tokenId ? '撤销中...' : '撤销'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 底部操作 */}
+          <div className='p-6 border-t border-gray-200 dark:border-gray-700 space-y-3'>
+            <button
+              onClick={handleRevokeAllDevices}
+              disabled={devices.length === 0}
+              className='w-full px-4 py-2.5 bg-red-500 hover:bg-red-600 disabled:bg-red-400 dark:bg-red-600 dark:hover:bg-red-700 dark:disabled:bg-red-500 text-white text-sm font-medium rounded-lg transition-colors disabled:cursor-not-allowed'
+            >
+              登出所有设备
+            </button>
+            <p className='text-xs text-gray-500 dark:text-gray-400 text-center'>
+              登出所有设备后需要重新登录
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  // 生态应用面板内容
+  const ecoAppsPanel = (
+    <>
+      {/* 背景遮罩 */}
+      <div
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-[1000]'
+        onClick={() => setIsEcoAppsOpen(false)}
+        onTouchMove={(e) => {
+          e.preventDefault();
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+        }}
+        style={{
+          touchAction: 'none',
+        }}
+      />
+
+      {/* 生态应用面板 */}
+      <div
+        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl bg-white dark:bg-gray-900 rounded-xl shadow-xl z-[1001] overflow-hidden'
+      >
+        <div
+          className='h-full max-h-[85vh] flex flex-col'
+          data-panel-content
+          onTouchMove={(e) => {
+            e.stopPropagation();
+          }}
+          style={{
+            touchAction: 'auto',
+          }}
+        >
+          {/* 标题栏 */}
+          <div className='flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700'>
+            <h3 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
+              生态应用
+            </h3>
+            <button
+              onClick={() => setIsEcoAppsOpen(false)}
+              className='w-8 h-8 p-1 rounded-full flex items-center justify-center text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors'
+              aria-label='Close'
+            >
+              <X className='w-full h-full' />
+            </button>
+          </div>
+
+          {/* 应用列表 */}
+          <div className='flex-1 overflow-y-auto p-6'>
+            <div className='grid gap-6 md:grid-cols-1'>
+              {/* MoonTVPlus-PC 客户端 */}
+              <div className='bg-gray-50 dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700'>
+                <div className='flex items-start gap-4'>
+                  <div className='flex-shrink-0 relative'>
+                    <img
+                      src='/logo.png'
+                      alt='MoonTVPlus-PC'
+                      className='w-16 h-16 rounded-xl object-cover'
+                    />
+                    <div className='absolute -bottom-1 -right-1 w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center shadow-lg'>
+                      <Monitor className='w-3.5 h-3.5 text-white' />
+                    </div>
+                  </div>
+                  <div className='flex-1 min-w-0'>
+                    <h4 className='text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2'>
+                      MoonTVPlus-PC客户端
+                    </h4>
+                    <p className='text-sm text-gray-600 dark:text-gray-400 mb-3'>
+                      专为Windows开发的客户端，完美支持私人影库mkv视频
+                    </p>
+                    <a
+                      href='https://github.com/mtvpls/MoonTVPlus-PC/releases'
+                      target='_blank'
+                      rel='noopener noreferrer'
+                      className='inline-flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition-colors'
+                    >
+                      <Download className='w-4 h-4' />
+                      下载
+                      <ExternalLink className='w-3 h-3' />
+                    </a>
+                  </div>
+                </div>
+              </div>
+
+              {/* Selene 跨平台客户端 */}
+              <div className='bg-gray-50 dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700'>
+                <div className='flex items-start gap-4'>
+                  <div className='flex-shrink-0 relative'>
+                    <img
+                      src='/icons/Selene.png'
+                      alt='Selene'
+                      className='w-16 h-16 rounded-xl object-cover'
+                    />
+                    <span className='absolute -top-1 -right-1 px-1.5 py-0.5 bg-orange-500 text-white text-[10px] font-bold rounded'>
+                      二开
+                    </span>
+                  </div>
+                  <div className='flex-1 min-w-0'>
+                    <h4 className='text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2'>
+                      Selene 跨平台客户端
+                    </h4>
+                    <p className='text-sm text-gray-600 dark:text-gray-400 mb-3'>
+                      多平台客户端
+                    </p>
+                    <div className='flex flex-wrap gap-2'>
+                      <a
+                        href='https://github.com/mtvpls/MoonTVPlus/releases/tag/Selene_Beta4'
+                        target='_blank'
+                        rel='noopener noreferrer'
+                        className='inline-flex items-center gap-2 px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-medium rounded-lg transition-colors'
+                      >
+                        <Download className='w-4 h-4' />
+                        安卓下载
+                        <ExternalLink className='w-3 h-3' />
+                      </a>
+                      <button
+                        onClick={() => {
+                          const ua = navigator.userAgent.toLowerCase();
+                          let targetUrl = 'https://github.com/mtvpls/Selene-Build/actions/workflows/build.yml';
+
+                          // 根据 UA 判断平台
+                          if (ua.includes('windows')) {
+                            targetUrl = 'https://github.com/mtvpls/Selene-Build/actions/workflows/build.yml';
+                          } else if (ua.includes('mac')) {
+                            targetUrl = 'https://github.com/mtvpls/Selene-Build/actions/workflows/build.yml';
+                          } else if (ua.includes('linux')) {
+                            targetUrl = 'https://github.com/mtvpls/Selene-Build/actions/workflows/build.yml';
+                          }
+
+                          window.open(targetUrl, '_blank');
+                        }}
+                        className='inline-flex items-center gap-2 px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium rounded-lg transition-colors'
+                      >
+                        <Download className='w-4 h-4' />
+                        其他平台
+                        <ExternalLink className='w-3 h-3' />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* OrionTV TV专用客户端 */}
+              <div className='bg-gray-50 dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700'>
+                <div className='flex items-start gap-4'>
+                  <div className='flex-shrink-0 relative'>
+                    <img
+                      src='/icons/OrionTV.png'
+                      alt='OrionTV'
+                      className='w-16 h-16 rounded-xl object-cover'
+                    />
+                    <span className='absolute -top-1 -right-1 px-1.5 py-0.5 bg-orange-500 text-white text-[10px] font-bold rounded'>
+                      二开
+                    </span>
+                  </div>
+                  <div className='flex-1 min-w-0'>
+                    <h4 className='text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2'>
+                      OrionTV TV专用客户端
+                    </h4>
+                    <p className='text-sm text-gray-600 dark:text-gray-400 mb-3'>
+                      tv专用
+                    </p>
+                    <a
+                      href='https://github.com/mtvpls/MoonTVPlus/releases/tag/OrionTV%E9%80%82%E9%85%8D%E7%89%882'
+                      target='_blank'
+                      rel='noopener noreferrer'
+                      className='inline-flex items-center gap-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium rounded-lg transition-colors'
+                    >
+                      <Download className='w-4 h-4' />
+                      下载
+                      <ExternalLink className='w-3 h-3' />
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 底部说明 */}
+          <div className='p-6 pt-4 border-t border-gray-200 dark:border-gray-700'>
+            <p className='text-xs text-gray-500 dark:text-gray-400 text-center'>
+              选择适合您设备的客户端下载使用
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
   return (
     <>
       <div className='relative'>
@@ -2434,6 +3176,56 @@ export const UserMenu: React.FC = () => {
       {isEmailSettingsOpen &&
         mounted &&
         createPortal(emailSettingsPanel, document.body)}
+
+      {/* 使用 Portal 将设备管理面板渲染到 document.body */}
+      {isDeviceManagementOpen &&
+        mounted &&
+        createPortal(deviceManagementPanel, document.body)}
+
+      {/* 使用 Portal 将生态应用面板渲染到 document.body */}
+      {isEcoAppsOpen &&
+        mounted &&
+        createPortal(ecoAppsPanel, document.body)}
+
+      {/* 确认对话框 */}
+      {confirmDialog.isOpen &&
+        mounted &&
+        createPortal(
+          <div className='fixed inset-0 z-[10000] flex items-center justify-center bg-black/50 backdrop-blur-sm'>
+            <div className='bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md m-4'>
+              {/* 标题 */}
+              <div className='p-6 border-b border-gray-200 dark:border-gray-700'>
+                <h3 className='text-lg font-semibold text-gray-900 dark:text-gray-100'>
+                  {confirmDialog.title}
+                </h3>
+              </div>
+
+              {/* 内容 */}
+              <div className='p-6'>
+                <p className='text-gray-700 dark:text-gray-300'>
+                  {confirmDialog.message}
+                </p>
+              </div>
+
+              {/* 按钮 */}
+              <div className='p-6 pt-0 flex gap-3 justify-end'>
+                <button
+                  onClick={() => setConfirmDialog({ ...confirmDialog, isOpen: false })}
+                  className='px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg transition-colors'
+                >
+                  取消
+                </button>
+                <button
+                  onClick={confirmDialog.onConfirm}
+                  className='px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 dark:bg-red-600 dark:hover:bg-red-700 rounded-lg transition-colors'
+                >
+                  确定
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </>
   );
 };

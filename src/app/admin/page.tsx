@@ -33,7 +33,9 @@ import {
   ExternalLink,
   FileText,
   FolderOpen,
+  Globe,
   Mail,
+  Music,
   Palette,
   Settings,
   Tv,
@@ -42,7 +44,7 @@ import {
   Video,
 } from 'lucide-react';
 import { GripVertical } from 'lucide-react';
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { AdminConfig, AdminConfigResult } from '@/lib/admin.types';
@@ -335,6 +337,7 @@ interface SiteConfig {
   PansouApiUrl?: string;
   PansouUsername?: string;
   PansouPassword?: string;
+  PansouKeywordBlocklist?: string;
   EnableComments: boolean;
   EnableRegistration?: boolean;
   RegistrationRequireTurnstile?: boolean;
@@ -362,6 +365,7 @@ interface DataSource {
   disabled?: boolean;
   from: 'config' | 'custom';
   proxyMode?: boolean;
+  weight?: number;
 }
 
 // 直播源数据类型
@@ -3617,11 +3621,6 @@ const EmbyConfigComponent = ({
 
   // 删除源
   const handleDelete = async (source: any) => {
-    if (sources.length === 1) {
-      showError('至少需要保留一个Emby源', showAlert);
-      return;
-    }
-
     if (!confirm(`确定要删除 "${source.name}" 吗？`)) {
       return;
     }
@@ -4498,6 +4497,52 @@ const VideoSourceConfig = ({
     });
   };
 
+  const handleUpdateWeight = (key: string, weight: number) => {
+    // 先乐观更新本地状态
+    setSources((prev) =>
+      prev.map((s) =>
+        s.key === key ? { ...s, weight } : s
+      )
+    );
+
+    // 调用API更新
+    withLoading(`updateWeight_${key}`, async () => {
+      try {
+        const response = await fetch('/api/admin/source', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'update_weight',
+            key,
+            weight,
+          }),
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || `操作失败: ${response.status}`);
+        }
+
+        await refreshConfig();
+      } catch (error) {
+        // 失败时回滚本地状态到配置中的值
+        const originalWeight = config?.SourceConfig?.find(s => s.key === key)?.weight ?? 0;
+        setSources((prev) =>
+          prev.map((s) =>
+            s.key === key ? { ...s, weight: originalWeight } : s
+          )
+        );
+        showError(
+          error instanceof Error ? error.message : '更新权重失败',
+          showAlert
+        );
+        throw error;
+      }
+    }).catch(() => {
+      console.error('操作失败', 'update_weight', key, weight);
+    });
+  };
+
   const handleAddSource = () => {
     if (!newSource.name || !newSource.key || !newSource.api) return;
     withLoading('addSource', async () => {
@@ -4724,8 +4769,48 @@ const VideoSourceConfig = ({
     }
   };
 
+  // 权重输入组件 - 使用本地状态避免输入时失焦
+  const WeightInput = memo(({ sourceKey, initialWeight }: { sourceKey: string; initialWeight: number }) => {
+    const [localWeight, setLocalWeight] = useState(initialWeight);
+
+    // 当外部权重变化时同步
+    useEffect(() => {
+      setLocalWeight(initialWeight);
+    }, [initialWeight]);
+
+    return (
+      <input
+        type='number'
+        inputMode='numeric'
+        min='0'
+        max='100'
+        value={localWeight}
+        onChange={(e) => {
+          const value = parseInt(e.target.value) || 0;
+          const clampedValue = Math.min(100, Math.max(0, value));
+          setLocalWeight(clampedValue);
+        }}
+        onBlur={(e) => {
+          const newValue = parseInt(e.target.value) || 0;
+          const clampedValue = Math.min(100, Math.max(0, newValue));
+          const originalWeight = config?.SourceConfig?.find(s => s.key === sourceKey)?.weight ?? 0;
+
+          // 只有在值发生变化时才调用API
+          if (clampedValue !== originalWeight) {
+            handleUpdateWeight(sourceKey, clampedValue);
+          }
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        className='w-16 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent'
+        title='权重范围：0-100，用于排序和优选评分'
+      />
+    );
+  });
+
   // 可拖拽行封装 (dnd-kit)
-  const DraggableRow = ({ source }: { source: DataSource }) => {
+  const DraggableRow = memo(({ source }: { source: DataSource }) => {
     const { attributes, listeners, setNodeRef, transform, transition } =
       useSortable({ id: source.key });
 
@@ -4810,6 +4895,9 @@ const VideoSourceConfig = ({
             />
           </button>
         </td>
+        <td className='px-6 py-4 whitespace-nowrap' style={{ touchAction: 'auto' }}>
+          <WeightInput sourceKey={source.key} initialWeight={source.weight ?? 0} />
+        </td>
         <td className='px-6 py-4 whitespace-nowrap max-w-[1rem]'>
           {(() => {
             const status = getValidationStatus(source.key);
@@ -4862,7 +4950,7 @@ const VideoSourceConfig = ({
         </td>
       </tr>
     );
-  };
+  });
 
   // 全选/取消全选
   const handleSelectAll = useCallback(
@@ -5192,6 +5280,9 @@ const VideoSourceConfig = ({
               </th>
               <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
                 代理模式
+              </th>
+              <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
+                权重
               </th>
               <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
                 有效性
@@ -6647,6 +6738,350 @@ const ThemeConfigComponent = ({
   );
 };
 
+// 音乐配置组件
+const MusicConfigComponent = ({
+  config,
+  refreshConfig,
+}: {
+  config: AdminConfig | null;
+  refreshConfig: () => Promise<void>;
+}) => {
+  const { alertModal, showAlert, hideAlert } = useAlertModal();
+  const { isLoading, withLoading } = useLoadingState();
+
+  const [musicSettings, setMusicSettings] = useState({
+    TuneHubEnabled: false,
+    TuneHubBaseUrl: 'https://tunehub.sayqz.com/api',
+    TuneHubApiKey: '',
+    OpenListCacheEnabled: false,
+    OpenListCacheURL: '',
+    OpenListCacheUsername: '',
+    OpenListCachePassword: '',
+    OpenListCachePath: '/music-cache',
+    OpenListCacheProxyEnabled: true,
+  });
+
+  // 从配置加载音乐设置
+  useEffect(() => {
+    if (config?.MusicConfig) {
+      setMusicSettings({
+        TuneHubEnabled: config.MusicConfig.TuneHubEnabled ?? false,
+        TuneHubBaseUrl: config.MusicConfig.TuneHubBaseUrl ?? 'https://tunehub.sayqz.com/api',
+        TuneHubApiKey: config.MusicConfig.TuneHubApiKey ?? '',
+        OpenListCacheEnabled: config.MusicConfig.OpenListCacheEnabled ?? false,
+        OpenListCacheURL: config.MusicConfig.OpenListCacheURL ?? '',
+        OpenListCacheUsername: config.MusicConfig.OpenListCacheUsername ?? '',
+        OpenListCachePassword: config.MusicConfig.OpenListCachePassword ?? '',
+        OpenListCachePath: config.MusicConfig.OpenListCachePath ?? '/music-cache',
+        OpenListCacheProxyEnabled: config.MusicConfig.OpenListCacheProxyEnabled ?? true,
+      });
+    }
+  }, [config]);
+
+  const handleSave = async () => {
+    await withLoading('saveMusicConfig', async () => {
+      try {
+        const resp = await fetch('/api/admin/music', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...musicSettings }),
+        });
+
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(data.error || '保存失败');
+        }
+
+        showAlert({ type: 'success', title: '保存成功', message: '音乐配置已更新', timer: 2000 });
+        await refreshConfig();
+      } catch (error: any) {
+        showAlert({ type: 'error', title: '保存失败', message: error.message || '未知错误', showConfirm: true });
+      }
+    });
+  };
+
+  return (
+    <div className='space-y-6'>
+      {/* TuneHub 音乐配置 */}
+      <div className='space-y-4'>
+        <h3 className='text-sm font-semibold text-gray-900 dark:text-gray-100'>
+          TuneHub 音乐配置
+        </h3>
+
+        {/* 开启音乐功能 */}
+        <div>
+          <div className='flex items-center justify-between'>
+            <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+              开启音乐功能
+            </label>
+            <button
+              type='button'
+              onClick={() =>
+                setMusicSettings((prev) => ({
+                  ...prev,
+                  TuneHubEnabled: !prev.TuneHubEnabled,
+                }))
+              }
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
+                musicSettings.TuneHubEnabled
+                  ? buttonStyles.toggleOn
+                  : buttonStyles.toggleOff
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full ${
+                  buttonStyles.toggleThumb
+                } transition-transform ${
+                  musicSettings.TuneHubEnabled
+                    ? buttonStyles.toggleThumbOn
+                    : buttonStyles.toggleThumbOff
+                }`}
+              />
+            </button>
+          </div>
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            开启后将在首页显示音乐视听入口，支持网易云、QQ音乐、酷我音乐
+          </p>
+        </div>
+
+        {/* TuneHub Base URL */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            TuneHub API 地址
+          </label>
+          <input
+            type='text'
+            placeholder='https://tunehub.sayqz.com/api'
+            value={musicSettings.TuneHubBaseUrl}
+            onChange={(e) =>
+              setMusicSettings((prev) => ({
+                ...prev,
+                TuneHubBaseUrl: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            TuneHub API 的基础地址，默认为 https://tunehub.sayqz.com/api。也可以通过环境变量 TUNEHUB_BASE_URL 配置
+          </p>
+        </div>
+
+        {/* TuneHub API Key */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            TuneHub API Key
+          </label>
+          <input
+            type='password'
+            placeholder='th_your_api_key_here'
+            value={musicSettings.TuneHubApiKey}
+            onChange={(e) =>
+              setMusicSettings((prev) => ({
+                ...prev,
+                TuneHubApiKey: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            用于解析歌曲播放链接的 API Key（消耗积分）。搜索、榜单、歌单等功能不需要 Key。也可以通过环境变量 TUNEHUB_API_KEY 配置
+          </p>
+        </div>
+      </div>
+
+      {/* OpenList 缓存配置 */}
+      <div className='space-y-4 pt-4 border-t border-gray-200 dark:border-gray-700'>
+        <h3 className='text-sm font-semibold text-gray-900 dark:text-gray-100'>
+          OpenList 缓存配置
+        </h3>
+
+        {/* 开启 OpenList 缓存 */}
+        <div>
+          <div className='flex items-center justify-between'>
+            <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+              开启 OpenList 缓存
+            </label>
+            <button
+              type='button'
+              onClick={() =>
+                setMusicSettings((prev) => ({
+                  ...prev,
+                  OpenListCacheEnabled: !prev.OpenListCacheEnabled,
+                }))
+              }
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
+                musicSettings.OpenListCacheEnabled
+                  ? buttonStyles.toggleOn
+                  : buttonStyles.toggleOff
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full ${
+                  buttonStyles.toggleThumb
+                } transition-transform ${
+                  musicSettings.OpenListCacheEnabled
+                    ? buttonStyles.toggleThumbOn
+                    : buttonStyles.toggleThumbOff
+                }`}
+              />
+            </button>
+          </div>
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            开启后将音乐解析结果（播放链接、歌词、元信息）和音频文件缓存到 OpenList，减少 API 调用次数并支持离线播放
+          </p>
+        </div>
+
+        {/* OpenList URL */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            OpenList 服务器地址
+          </label>
+          <input
+            type='text'
+            placeholder='https://your-openlist-server.com'
+            value={musicSettings.OpenListCacheURL}
+            onChange={(e) =>
+              setMusicSettings((prev) => ({
+                ...prev,
+                OpenListCacheURL: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            OpenList 服务器的完整地址（例如：https://your-openlist-server.com）
+          </p>
+        </div>
+
+        {/* OpenList 用户名 */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            OpenList 用户名
+          </label>
+          <input
+            type='text'
+            placeholder='admin'
+            value={musicSettings.OpenListCacheUsername}
+            onChange={(e) =>
+              setMusicSettings((prev) => ({
+                ...prev,
+                OpenListCacheUsername: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+        </div>
+
+        {/* OpenList 密码 */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            OpenList 密码
+          </label>
+          <input
+            type='password'
+            placeholder='••••••••'
+            value={musicSettings.OpenListCachePassword}
+            onChange={(e) =>
+              setMusicSettings((prev) => ({
+                ...prev,
+                OpenListCachePassword: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            用于登录 OpenList 并获取访问权限
+          </p>
+        </div>
+
+        {/* OpenList 缓存目录 */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            缓存目录路径
+          </label>
+          <input
+            type='text'
+            placeholder='/music-cache'
+            value={musicSettings.OpenListCachePath}
+            onChange={(e) =>
+              setMusicSettings((prev) => ({
+                ...prev,
+                OpenListCachePath: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            音乐缓存在 OpenList 中的存储目录（例如：/music-cache）
+          </p>
+        </div>
+
+        {/* 缓存代理返回开关 */}
+        <div>
+          <div className='flex items-center justify-between'>
+            <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+              启用缓存代理返回
+            </label>
+            <button
+              type='button'
+              onClick={() =>
+                setMusicSettings((prev) => ({
+                  ...prev,
+                  OpenListCacheProxyEnabled: !prev.OpenListCacheProxyEnabled,
+                }))
+              }
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
+                musicSettings.OpenListCacheProxyEnabled
+                  ? buttonStyles.toggleOn
+                  : buttonStyles.toggleOff
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full ${
+                  buttonStyles.toggleThumb
+                } transition-transform ${
+                  musicSettings.OpenListCacheProxyEnabled
+                    ? buttonStyles.toggleThumbOn
+                    : buttonStyles.toggleThumbOff
+                }`}
+              />
+            </button>
+          </div>
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            开启后，如果 OpenList 有缓存，将通过代理方式返回给前端，并设置永久缓存头，提升加载速度
+          </p>
+        </div>
+      </div>
+
+      {/* 操作按钮 */}
+      <div className='flex justify-end'>
+        <button
+          onClick={handleSave}
+          disabled={isLoading('saveMusicConfig')}
+          className={`px-4 py-2 ${
+            isLoading('saveMusicConfig')
+              ? buttonStyles.disabled
+              : buttonStyles.success
+          } rounded-lg transition-colors`}
+        >
+          {isLoading('saveMusicConfig') ? '保存中…' : '保存'}
+        </button>
+      </div>
+
+      {/* 弹窗 */}
+      <AlertModal
+        isOpen={alertModal.isOpen}
+        onClose={hideAlert}
+        type={alertModal.type}
+        title={alertModal.title}
+        message={alertModal.message}
+        timer={alertModal.timer}
+        showConfirm={alertModal.showConfirm}
+      />
+    </div>
+  );
+};
+
 // 新增站点配置组件
 const SiteConfigComponent = ({
   config,
@@ -6678,6 +7113,7 @@ const SiteConfigComponent = ({
     PansouApiUrl: '',
     PansouUsername: '',
     PansouPassword: '',
+    PansouKeywordBlocklist: '',
     EnableComments: false,
     EnableRegistration: false,
     RegistrationRequireTurnstile: false,
@@ -6768,6 +7204,7 @@ const SiteConfigComponent = ({
         PansouApiUrl: config.SiteConfig.PansouApiUrl || '',
         PansouUsername: config.SiteConfig.PansouUsername || '',
         PansouPassword: config.SiteConfig.PansouPassword || '',
+        PansouKeywordBlocklist: config.SiteConfig.PansouKeywordBlocklist || '',
         EnableComments: config.SiteConfig.EnableComments || false,
       });
     }
@@ -7505,6 +7942,28 @@ const SiteConfigComponent = ({
           />
           <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
             配置账号密码后，系统会自动登录并缓存 Token
+          </p>
+        </div>
+
+        {/* 关键词屏蔽 */}
+        <div>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            关键词屏蔽（可选）
+          </label>
+          <input
+            type='text'
+            placeholder='多个关键词用中文或英文逗号分隔'
+            value={siteSettings.PansouKeywordBlocklist}
+            onChange={(e) =>
+              setSiteSettings((prev) => ({
+                ...prev,
+                PansouKeywordBlocklist: e.target.value,
+              }))
+            }
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            设置后会过滤包含这些关键词的搜索结果
           </p>
         </div>
       </div>
@@ -8428,18 +8887,51 @@ const CustomAdFilterConfig = ({
   const defaultAdFilterCode = `function filterAdsFromM3U8(type: string, m3u8Content: string): string {
   if (!m3u8Content) return '';
 
+  // 广告关键字列表
+  const adKeywords = [
+    'sponsor',
+    '/ad/',
+    '/ads/',
+    'advert',
+    'advertisement',
+    '/adjump',
+    'redtraffic'
+  ];
+
   // 按行分割M3U8内容
   const lines = m3u8Content.split('\\n');
   const filteredLines = [];
 
-  let nextdelete = false;
-  for (let i = 0; i < lines.length; i++) {
+  let i = 0;
+  while (i < lines.length) {
     const line = lines[i];
 
-    // 只过滤#EXT-X-DISCONTINUITY标识
-    if (!line.includes('#EXT-X-DISCONTINUITY')) {
-      filteredLines.push(line);
+    // 跳过 #EXT-X-DISCONTINUITY 标识
+    if (line.includes('#EXT-X-DISCONTINUITY')) {
+      i++;
+      continue;
     }
+
+    // 如果是 EXTINF 行，检查下一行 URL 是否包含广告关键字
+    if (line.includes('#EXTINF:')) {
+      // 检查下一行 URL 是否包含广告关键字
+      if (i + 1 < lines.length) {
+        const nextLine = lines[i + 1];
+        const containsAdKeyword = adKeywords.some(keyword =>
+          nextLine.toLowerCase().includes(keyword.toLowerCase())
+        );
+
+        if (containsAdKeyword) {
+          // 跳过 EXTINF 行和 URL 行
+          i += 2;
+          continue;
+        }
+      }
+    }
+
+    // 保留当前行
+    filteredLines.push(line);
+    i++;
   }
 
   return filteredLines.join('\\n');
@@ -10715,6 +11207,381 @@ const LiveSourceConfig = ({
   );
 };
 
+// 网络直播配置组件
+const WebLiveConfig = ({
+  config,
+  refreshConfig,
+}: {
+  config: AdminConfig | null;
+  refreshConfig: () => Promise<void>;
+}) => {
+  const { alertModal, showAlert, hideAlert } = useAlertModal();
+  const { isLoading, withLoading } = useLoadingState();
+  const [webLiveSources, setWebLiveSources] = useState<any[]>([]);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [editingSource, setEditingSource] = useState<any | null>(null);
+  const [newSource, setNewSource] = useState({
+    name: '',
+    platform: 'huya',
+    roomId: '',
+  });
+  const [showDisclaimerModal, setShowDisclaimerModal] = useState(false);
+  const [countdown, setCountdown] = useState(10);
+  const [isEnabling, setIsEnabling] = useState(false);
+
+  useEffect(() => {
+    if (config?.WebLiveConfig) {
+      setWebLiveSources(config.WebLiveConfig);
+    }
+  }, [config]);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (showDisclaimerModal && countdown > 0) {
+      timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+    }
+    return () => clearTimeout(timer);
+  }, [showDisclaimerModal, countdown]);
+
+  const callApi = async (body: Record<string, any>) => {
+    try {
+      const resp = await fetch('/api/admin/web-live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || `操作失败: ${resp.status}`);
+      }
+      await refreshConfig();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : '操作失败', showAlert);
+      throw err;
+    }
+  };
+
+  const handleAdd = () => {
+    if (!newSource.name || !newSource.platform || !newSource.roomId) return;
+    withLoading('addWebLive', async () => {
+      await callApi({
+        action: 'add',
+        name: newSource.name,
+        platform: newSource.platform,
+        roomId: newSource.roomId,
+      });
+      setNewSource({ name: '', platform: 'huya', roomId: '' });
+      setShowAddForm(false);
+    }).catch(() => {});
+  };
+
+  const handleEdit = () => {
+    if (!editingSource || !editingSource.name || !editingSource.roomId) return;
+    withLoading('editWebLive', async () => {
+      await callApi({
+        action: 'edit',
+        key: editingSource.key,
+        name: editingSource.name,
+        platform: editingSource.platform,
+        roomId: editingSource.roomId,
+      });
+      setEditingSource(null);
+    }).catch(() => {});
+  };
+
+  const handleToggle = (key: string) => {
+    const target = webLiveSources.find((s) => s.key === key);
+    if (!target) return;
+    const action = target.disabled ? 'enable' : 'disable';
+    withLoading(`toggleWebLive_${key}`, () => callApi({ action, key })).catch(() => {});
+  };
+
+  const handleDelete = (key: string) => {
+    withLoading(`deleteWebLive_${key}`, () => callApi({ action: 'delete', key })).catch(() => {});
+  };
+
+  const handleToggleWebLiveEnabled = async () => {
+    const currentEnabled = config?.WebLiveEnabled ?? false;
+
+    if (!currentEnabled) {
+      setShowDisclaimerModal(true);
+      setCountdown(10);
+    } else {
+      await withLoading('toggleWebLiveEnabled', async () => {
+        await callApi({ action: 'toggleEnabled', enabled: false });
+      }).catch(() => {});
+    }
+  };
+
+  const handleConfirmEnable = async () => {
+    setIsEnabling(true);
+    try {
+      await callApi({ action: 'toggleEnabled', enabled: true });
+      setShowDisclaimerModal(false);
+      setCountdown(10);
+    } catch (err) {
+      // Error already handled by callApi
+    } finally {
+      setIsEnabling(false);
+    }
+  };
+
+  if (!config) {
+    return <div className='text-center text-gray-500 dark:text-gray-400'>加载中...</div>;
+  }
+
+  return (
+    <div className='space-y-6'>
+      {/* 功能总开关 */}
+      <div className='p-4 bg-gradient-to-r from-orange-50 to-red-50 dark:from-orange-900/20 dark:to-red-900/20 rounded-lg border-2 border-orange-300 dark:border-orange-700'>
+        <div className='flex items-center justify-between'>
+          <div className='flex-1'>
+            <h4 className='text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1'>
+              网络直播功能总开关
+            </h4>
+            <p className='text-xs text-gray-600 dark:text-gray-400'>
+              关闭后，侧边栏和底部导航栏的网络直播入口将被隐藏，用户无法访问网络直播页面
+            </p>
+          </div>
+          <button
+            onClick={handleToggleWebLiveEnabled}
+            disabled={isLoading('toggleWebLiveEnabled')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${
+              config.WebLiveEnabled ? buttonStyles.toggleOn : buttonStyles.toggleOff
+            } ${isLoading('toggleWebLiveEnabled') ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full transition-transform ${
+                buttonStyles.toggleThumb
+              } ${config.WebLiveEnabled ? buttonStyles.toggleThumbOn : buttonStyles.toggleThumbOff}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* 免责声明弹窗 */}
+      {showDisclaimerModal && createPortal(
+        <div className='fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4'>
+          <div className='bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full border border-red-200 dark:border-red-800'>
+            <div className='p-6'>
+              <div className='flex justify-center mb-4'>
+                <AlertTriangle className='w-12 h-12 text-red-500' />
+              </div>
+
+              <h3 className='text-xl font-bold text-gray-900 dark:text-gray-100 mb-4 text-center'>
+                免责声明
+              </h3>
+
+              <div className='bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-6'>
+                <p className='text-sm text-gray-700 dark:text-gray-300 leading-relaxed'>
+                  本功能仅供个人学习和技术研究使用，请勿将其部署在公网环境中，更不得用于任何违法违规行为。
+                  使用本功能所产生的一切法律责任由使用者自行承担，与开发者无关。
+                  启用此功能即表示您已充分理解并同意承担相应风险。
+                </p>
+              </div>
+
+              <div className='flex gap-3 justify-center'>
+                <button
+                  onClick={() => {
+                    setShowDisclaimerModal(false);
+                    setCountdown(10);
+                  }}
+                  className={buttonStyles.secondary}
+                  disabled={isEnabling}
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleConfirmEnable}
+                  disabled={countdown > 0 || isEnabling}
+                  className={countdown > 0 || isEnabling ? buttonStyles.disabled : buttonStyles.danger}
+                >
+                  {isEnabling ? '启用中...' : countdown > 0 ? `确认 (${countdown}s)` : '确认启用'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      <div className='flex items-center justify-between'>
+        <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>网络直播列表</h4>
+        <button
+          onClick={() => setShowAddForm(!showAddForm)}
+          className={showAddForm ? buttonStyles.secondary : buttonStyles.success}
+        >
+          {showAddForm ? '取消' : '添加网络直播'}
+        </button>
+      </div>
+
+      {showAddForm && (
+        <div className='p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 space-y-4'>
+          <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
+            <input
+              type='text'
+              placeholder='名称'
+              value={newSource.name}
+              onChange={(e) => setNewSource((prev) => ({ ...prev, name: e.target.value }))}
+              className='px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+            />
+            <select
+              value={newSource.platform}
+              onChange={(e) => setNewSource((prev) => ({ ...prev, platform: e.target.value }))}
+              className='px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+            >
+              <option value='huya'>虎牙</option>
+              <option value='bilibili'>哔哩哔哩</option>
+              <option value='douyin'>抖音</option>
+            </select>
+            <input
+              type='text'
+              placeholder='房间ID'
+              value={newSource.roomId}
+              onChange={(e) => setNewSource((prev) => ({ ...prev, roomId: e.target.value }))}
+              className='px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+            />
+          </div>
+          <div className='flex justify-end'>
+            <button
+              onClick={handleAdd}
+              disabled={!newSource.name || !newSource.platform || !newSource.roomId || isLoading('addWebLive')}
+              className={`w-full sm:w-auto px-4 py-2 ${
+                !newSource.name || !newSource.platform || !newSource.roomId || isLoading('addWebLive')
+                  ? buttonStyles.disabled
+                  : buttonStyles.success
+              }`}
+            >
+              {isLoading('addWebLive') ? '添加中...' : '添加'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {editingSource && (
+        <div className='p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 space-y-4'>
+          <div className='flex items-center justify-between'>
+            <h5 className='text-sm font-medium text-gray-700 dark:text-gray-300'>编辑: {editingSource.name}</h5>
+            <button onClick={() => setEditingSource(null)} className='text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'>✕</button>
+          </div>
+          <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
+            <div>
+              <label className='block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1'>名称</label>
+              <input
+                type='text'
+                value={editingSource.name}
+                onChange={(e) => setEditingSource((prev: any) => prev ? { ...prev, name: e.target.value } : null)}
+                className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+              />
+            </div>
+            <div>
+              <label className='block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1'>直播类型</label>
+              <select
+                value={editingSource.platform}
+                onChange={(e) => setEditingSource((prev: any) => prev ? { ...prev, platform: e.target.value } : null)}
+                className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+              >
+                <option value='huya'>虎牙</option>
+                <option value='bilibili'>哔哩哔哩</option>
+                <option value='douyin'>抖音</option>
+              </select>
+            </div>
+            <div>
+              <label className='block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1'>房间ID</label>
+              <input
+                type='text'
+                value={editingSource.roomId}
+                onChange={(e) => setEditingSource((prev: any) => prev ? { ...prev, roomId: e.target.value } : null)}
+                className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+              />
+            </div>
+          </div>
+          <div className='flex justify-end space-x-2'>
+            <button onClick={() => setEditingSource(null)} className={buttonStyles.secondary}>取消</button>
+            <button
+              onClick={handleEdit}
+              disabled={!editingSource.name || !editingSource.roomId || isLoading('editWebLive')}
+              className={`${!editingSource.name || !editingSource.roomId || isLoading('editWebLive') ? buttonStyles.disabled : buttonStyles.success}`}
+            >
+              {isLoading('editWebLive') ? '保存中...' : '保存'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className='border border-gray-200 dark:border-gray-700 rounded-lg overflow-auto'>
+        <table className='min-w-full divide-y divide-gray-200 dark:divide-gray-700'>
+          <thead className='bg-gray-50 dark:bg-gray-900'>
+            <tr>
+              <th className='px-3 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase'>名称</th>
+              <th className='hidden sm:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase'>直播类型</th>
+              <th className='hidden sm:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase'>房间ID</th>
+              <th className='px-3 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase'>状态</th>
+              <th className='px-3 sm:px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase'>操作</th>
+            </tr>
+          </thead>
+          <tbody className='divide-y divide-gray-200 dark:divide-gray-700'>
+            {webLiveSources.map((source) => (
+              <tr key={source.key} className='hover:bg-gray-50 dark:hover:bg-gray-800'>
+                <td className='px-3 sm:px-6 py-4 text-sm text-gray-900 dark:text-gray-100'>
+                  <div>{source.name}</div>
+                  <div className='sm:hidden text-xs text-gray-500 dark:text-gray-400 mt-1'>{source.platform === 'huya' ? '虎牙' : source.platform === 'bilibili' ? '哔哩哔哩' : source.platform === 'douyin' ? '抖音' : source.platform} · {source.roomId}</div>
+                </td>
+                <td className='hidden sm:table-cell px-6 py-4 text-sm text-gray-900 dark:text-gray-100'>{source.platform === 'huya' ? '虎牙' : source.platform === 'bilibili' ? '哔哩哔哩' : source.platform === 'douyin' ? '抖音' : source.platform}</td>
+                <td className='hidden sm:table-cell px-6 py-4 text-sm text-gray-900 dark:text-gray-100'>{source.roomId}</td>
+                <td className='px-3 sm:px-6 py-4 whitespace-nowrap'>
+                  <span className={`px-2 py-1 text-xs rounded-full whitespace-nowrap ${!source.disabled ? 'bg-green-100 dark:bg-green-900/20 text-green-800 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/20 text-red-800 dark:text-red-300'}`}>
+                    {!source.disabled ? '启用中' : '已禁用'}
+                  </span>
+                </td>
+                <td className='px-3 sm:px-6 py-4 text-right text-sm whitespace-nowrap'>
+                  <div className='flex flex-col sm:flex-row gap-1 sm:gap-2 items-end sm:items-center justify-end'>
+                    <button
+                      onClick={() => handleToggle(source.key)}
+                      disabled={isLoading(`toggleWebLive_${source.key}`)}
+                      className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium ${!source.disabled ? buttonStyles.roundedDanger : buttonStyles.roundedSuccess} ${isLoading(`toggleWebLive_${source.key}`) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      {!source.disabled ? '禁用' : '启用'}
+                    </button>
+                    {source.from !== 'config' && (
+                      <>
+                        <button
+                          onClick={() => setEditingSource(source)}
+                          disabled={isLoading(`editWebLive_${source.key}`)}
+                          className={`${buttonStyles.roundedPrimary} ${isLoading(`editWebLive_${source.key}`) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          onClick={() => handleDelete(source.key)}
+                          disabled={isLoading(`deleteWebLive_${source.key}`)}
+                          className={`${buttonStyles.roundedSecondary} ${isLoading(`deleteWebLive_${source.key}`) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                          删除
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <AlertModal
+        isOpen={alertModal.isOpen}
+        onClose={hideAlert}
+        type={alertModal.type}
+        title={alertModal.title}
+        message={alertModal.message}
+        timer={alertModal.timer}
+        showConfirm={alertModal.showConfirm}
+      />
+    </div>
+  );
+};
+
 function AdminPageClient() {
   const { alertModal, showAlert, hideAlert } = useAlertModal();
   const { isLoading, withLoading } = useLoadingState();
@@ -10732,7 +11599,9 @@ function AdminPageClient() {
     xiaoyaConfig: false,
     aiConfig: false,
     liveSource: false,
+    webLive: false,
     siteConfig: false,
+    musicConfig: false,
     registrationConfig: false,
     categoryConfig: false,
     configFile: false,
@@ -10762,8 +11631,12 @@ function AdminPageClient() {
       setRole(data.Role);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '获取配置失败';
-      showError(msg, showAlert);
-      setError(msg);
+      // 只在首次加载时设置错误状态，避免弹窗和错误页面同时显示
+      if (showLoading) {
+        setError(msg);
+      } else {
+        showError(msg, showAlert);
+      }
     } finally {
       if (showLoading) {
         setLoading(false);
@@ -10789,7 +11662,7 @@ function AdminPageClient() {
   const userLimit = 10;
 
   // 获取新版本用户列表
-  const fetchUsersV2 = useCallback(async (page: number = 1) => {
+  const fetchUsersV2 = useCallback(async (page = 1) => {
     try {
       setUserListLoading(true);
       const response = await fetch(`/api/admin/users?page=${page}&limit=${userLimit}`);
@@ -10896,8 +11769,42 @@ function AdminPageClient() {
   }
 
   if (error) {
-    // 错误已通过弹窗展示，此处直接返回空
-    return null;
+    // 显示无权限提示页面
+    return (
+      <PageLayout activePath='/admin'>
+        <div className='min-h-screen flex items-center justify-center px-4'>
+          <div className='max-w-md w-full'>
+            <div className='bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center'>
+              <div className='mb-6'>
+                <div className='mx-auto w-16 h-16 bg-red-100 dark:bg-red-900/20 rounded-full flex items-center justify-center'>
+                  <AlertCircle className='w-8 h-8 text-red-600 dark:text-red-400' />
+                </div>
+              </div>
+              <h2 className='text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4'>
+                无权限访问
+              </h2>
+              <p className='text-gray-600 dark:text-gray-400 mb-6'>
+                {error}
+              </p>
+              <div className='space-y-3'>
+                <button
+                  onClick={() => window.location.href = '/'}
+                  className='w-full px-6 py-3 bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 text-white rounded-lg font-medium transition-colors'
+                >
+                  返回首页
+                </button>
+                <button
+                  onClick={() => window.location.href = '/login'}
+                  className='w-full px-6 py-3 bg-gray-600 hover:bg-gray-700 dark:bg-gray-600 dark:hover:bg-gray-700 text-white rounded-lg font-medium transition-colors'
+                >
+                  重新登录
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </PageLayout>
+    );
   }
 
   return (
@@ -11033,6 +11940,21 @@ function AdminPageClient() {
               />
             </CollapsibleTab>
 
+            {/* 音乐配置标签 */}
+            <CollapsibleTab
+              title='音乐配置'
+              icon={
+                <Music
+                  size={20}
+                  className='text-gray-600 dark:text-gray-400'
+                />
+              }
+              isExpanded={expandedTabs.musicConfig}
+              onToggle={() => toggleTab('musicConfig')}
+            >
+              <MusicConfigComponent config={config} refreshConfig={fetchConfig} />
+            </CollapsibleTab>
+
             {/* 视频源配置标签 */}
             <CollapsibleTab
               title='视频源配置'
@@ -11045,9 +11967,9 @@ function AdminPageClient() {
               <VideoSourceConfig config={config} refreshConfig={fetchConfig} />
             </CollapsibleTab>
 
-            {/* 直播源配置标签 */}
+            {/* 电视直播源配置标签 */}
             <CollapsibleTab
-              title='直播源配置'
+              title='电视直播源配置'
               icon={
                 <Tv size={20} className='text-gray-600 dark:text-gray-400' />
               }
@@ -11055,6 +11977,18 @@ function AdminPageClient() {
               onToggle={() => toggleTab('liveSource')}
             >
               <LiveSourceConfig config={config} refreshConfig={fetchConfig} />
+            </CollapsibleTab>
+
+            {/* 网络直播配置标签 */}
+            <CollapsibleTab
+              title='网络直播配置'
+              icon={
+                <Globe size={20} className='text-gray-600 dark:text-gray-400' />
+              }
+              isExpanded={expandedTabs.webLive}
+              onToggle={() => toggleTab('webLive')}
+            >
+              <WebLiveConfig config={config} refreshConfig={fetchConfig} />
             </CollapsibleTab>
 
             {/* 私人影库大类 */}

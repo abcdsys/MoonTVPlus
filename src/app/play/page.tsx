@@ -2,70 +2,69 @@
 
 'use client';
 
-import { Heart, Search, X, Cloud, Sparkles, AlertCircle } from 'lucide-react';
+import { AlertCircle,Cloud, Heart, Sparkles, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
 
-import { usePlaySync } from '@/hooks/usePlaySync';
-import { getDoubanDetail } from '@/lib/douban.client';
-import { useDownload } from '@/contexts/DownloadContext';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
-import { useSite } from '@/components/SiteProvider';
-
+import {
+  convertDanmakuFormat,
+  getDanmakuById,
+  getDanmakuFromCache,
+  getEpisodes,
+  initDanmakuModule,
+  loadDanmakuDisplayState,
+  loadDanmakuSettings,
+  saveDanmakuDisplayState,
+  saveDanmakuSettings,
+  searchAnime,
+} from '@/lib/danmaku/api';
+import {
+  getDanmakuAnimeId,
+  getDanmakuSearchKeyword,
+  getDanmakuSourceIndex,
+  getManualDanmakuSelection,
+  saveDanmakuAnimeId,
+  saveDanmakuSearchKeyword,
+  saveDanmakuSourceIndex,
+  saveManualDanmakuSelection,
+} from '@/lib/danmaku/selection-memory';
+import type { DanmakuAnime, DanmakuComment,DanmakuSelection, DanmakuSettings } from '@/lib/danmaku/types';
 import {
   deleteFavorite,
   deletePlayRecord,
   deleteSkipConfig,
   generateStorageKey,
   getAllPlayRecords,
+  getDanmakuFilterConfig,
+  getEpisodeFilterConfig,
   getSkipConfig,
   isFavorited,
   saveFavorite,
   savePlayRecord,
   saveSkipConfig,
   subscribeToDataUpdates,
-  getDanmakuFilterConfig,
-  getEpisodeFilterConfig,
 } from '@/lib/db.client';
-import {
-  convertDanmakuFormat,
-  getDanmakuById,
-  getEpisodes,
-  loadDanmakuSettings,
-  saveDanmakuSettings,
-  searchAnime,
-  initDanmakuModule,
-  getDanmakuFromCache,
-  saveDanmakuDisplayState,
-  loadDanmakuDisplayState,
-} from '@/lib/danmaku/api';
-import {
-  getDanmakuSourceIndex,
-  saveDanmakuSourceIndex,
-  getManualDanmakuSelection,
-  saveManualDanmakuSelection,
-  saveDanmakuSearchKeyword,
-  getDanmakuSearchKeyword,
-  saveDanmakuAnimeId,
-  getDanmakuAnimeId,
-} from '@/lib/danmaku/selection-memory';
-import type { DanmakuAnime, DanmakuSelection, DanmakuSettings, DanmakuComment } from '@/lib/danmaku/types';
-import { SearchResult, DanmakuFilterConfig, EpisodeFilterConfig } from '@/lib/types';
-import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
+import { getDoubanDetail } from '@/lib/douban.client';
 import { getTMDBImageUrl } from '@/lib/tmdb.search';
-
-import EpisodeSelector from '@/components/EpisodeSelector';
-import DownloadEpisodeSelector from '@/components/DownloadEpisodeSelector';
-import PageLayout from '@/components/PageLayout';
-import DoubanComments from '@/components/DoubanComments';
-import SmartRecommendations from '@/components/SmartRecommendations';
-import DanmakuFilterSettings from '@/components/DanmakuFilterSettings';
-import Toast, { ToastProps } from '@/components/Toast';
-import AIChatPanel from '@/components/AIChatPanel';
+import { DanmakuFilterConfig, EpisodeFilterConfig,SearchResult } from '@/lib/types';
+import { base58Decode, getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
 import { useEnableComments } from '@/hooks/useEnableComments';
-import PansouSearch from '@/components/PansouSearch';
-import CustomHeatmap from '@/components/CustomHeatmap';
+import { usePlaySync } from '@/hooks/usePlaySync';
+
+import AIChatPanel from '@/components/AIChatPanel';
 import CorrectDialog from '@/components/CorrectDialog';
+import DanmakuFilterSettings from '@/components/DanmakuFilterSettings';
+import DoubanComments from '@/components/DoubanComments';
+import DownloadEpisodeSelector from '@/components/DownloadEpisodeSelector';
+import EpisodeSelector from '@/components/EpisodeSelector';
+import PageLayout from '@/components/PageLayout';
+import PansouSearch from '@/components/PansouSearch';
+import { useSite } from '@/components/SiteProvider';
+import SmartRecommendations from '@/components/SmartRecommendations';
+import Toast, { ToastProps } from '@/components/Toast';
+
+import { useDownload } from '@/contexts/DownloadContext';
 
 // 扩展 HTMLVideoElement 类型以支持 hls 属性
 declare global {
@@ -245,14 +244,8 @@ function PlayPageClient() {
           console.log('使用缓存的去广告代码');
         }
 
-        // 第一步：先只获取版本号，检查是否需要更新
-        const versionResponse = await fetch('/api/ad-filter');
-        if (!versionResponse.ok) {
-          console.warn('获取去广告代码版本失败，使用缓存');
-          return;
-        }
-
-        const { version } = await versionResponse.json();
+        // 从 window.RUNTIME_CONFIG 获取版本号
+        const version = (window as any).RUNTIME_CONFIG?.CUSTOM_AD_FILTER_VERSION || 0;
 
         // 如果版本号为 0，说明去广告未设置，清空缓存并跳过
         if (version === 0) {
@@ -267,7 +260,7 @@ function PlayPageClient() {
         if (!cachedVersion || parseInt(cachedVersion) !== version) {
           console.log('检测到去广告代码更新（版本 ' + version + '），获取最新代码');
 
-          // 第二步：获取完整代码
+          // 获取完整代码
           const fullResponse = await fetch('/api/ad-filter?full=true');
           if (!fullResponse.ok) {
             console.warn('获取完整去广告代码失败，使用缓存');
@@ -334,6 +327,39 @@ function PlayPageClient() {
       }
 
       try {
+        // 修复anime4k-webgpu库的buffer size限制问题
+        // 在全局层面patch requestAdapter，确保所有adapter都有正确的limits
+        const originalRequestAdapter = (navigator as any).gpu.requestAdapter.bind((navigator as any).gpu);
+
+        (navigator as any).gpu.requestAdapter = async (options?: any) => {
+          const adapter = await originalRequestAdapter(options);
+          if (!adapter) return adapter;
+
+          // 保存原始的requestDevice方法
+          const originalRequestDevice = adapter.requestDevice.bind(adapter);
+
+          // 重写requestDevice方法，添加必要的buffer size限制
+          adapter.requestDevice = async (descriptor?: any) => {
+            const adapterLimits = adapter.limits;
+
+            // 合并用户提供的descriptor和我们需要的limits
+            const enhancedDescriptor = {
+              ...descriptor,
+              requiredLimits: {
+                ...descriptor?.requiredLimits,
+                // 使用adapter支持的最大值，但不超过2GB
+                maxBufferSize: Math.min(adapterLimits.maxBufferSize || 2147483648, 2147483648),
+                maxStorageBufferBindingSize: Math.min(adapterLimits.maxStorageBufferBindingSize || 1073741824, 1073741824),
+              }
+            };
+
+            console.log('WebGPU设备请求配置:', enhancedDescriptor.requiredLimits);
+            return originalRequestDevice(enhancedDescriptor);
+          };
+
+          return adapter;
+        };
+
         const adapter = await (navigator as any).gpu.requestAdapter();
         if (!adapter) {
           setWebGPUSupported(false);
@@ -343,6 +369,10 @@ function PlayPageClient() {
 
         setWebGPUSupported(true);
         console.log('WebGPU支持检测：✅ 支持');
+        console.log('Adapter limits:', {
+          maxBufferSize: adapter.limits.maxBufferSize,
+          maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize
+        });
       } catch (err) {
         setWebGPUSupported(false);
         console.log('WebGPU不支持：', err);
@@ -367,6 +397,7 @@ function PlayPageClient() {
   >([]);
   const [danmakuLoading, setDanmakuLoading] = useState(false);
   const [danmakuCount, setDanmakuCount] = useState(0);
+  const [danmakuOriginalCount, setDanmakuOriginalCount] = useState(0);
   const danmakuPluginRef = useRef<any>(null);
   const danmakuSettingsRef = useRef(danmakuSettings);
 
@@ -494,6 +525,7 @@ function PlayPageClient() {
   const [currentSource, setCurrentSource] = useState(searchParams.get('source') || '');
   const [currentId, setCurrentId] = useState(searchParams.get('id') || '');
   const [fileName] = useState(searchParams.get('fileName') || ''); // 小雅源：用户点击的文件名
+  const isDirectPlay = currentSource === 'directplay';
 
   // 解析 source 参数以获取 embyKey（仅用于 API 调用）
   const parseSourceForApi = (source: string): { source: string; embyKey?: string } => {
@@ -550,7 +582,7 @@ function PlayPageClient() {
     // 只有用户主动点击推荐时才会添加 _reload 参数
     if (reloadParam && urlTitle && urlTitle !== videoTitle && !isSourceChangingRef.current) {
       console.log('[PlayPage] User clicked recommendation, reloading page');
-      window.location.href = window.location.href;
+      window.location.reload();
     }
 
     // 重置换源标记
@@ -607,6 +639,17 @@ function PlayPageClient() {
       return;
     }
 
+    if (isDirectPlay) {
+      return;
+    }
+
+    // 检查是否禁用了自动装填弹幕
+    const disableAutoLoad = localStorage.getItem('disableAutoLoadDanmaku') === 'true';
+    if (disableAutoLoad) {
+      console.log('[弹幕] 已禁用自动装填弹幕，跳过自动加载');
+      return;
+    }
+
     // 检查集数是否有效且是否已改变
     if (currentEpisodeIndex < 0 || !videoTitle) {
       return;
@@ -644,18 +687,6 @@ function PlayPageClient() {
         const cachedData = await getDanmakuFromCache(title, episodeIndex);
         if (cachedData && cachedData.comments.length > 0) {
           console.log(`[弹幕] 使用缓存: title="${title}", episodeIndex=${episodeIndex}, 数量=${cachedData.comments.length}`);
-
-          // 如果缓存中有元信息，更新当前选择状态
-          if (cachedData.metadata) {
-            setCurrentDanmakuSelection({
-              animeId: cachedData.metadata.animeId || 0,
-              episodeId: cachedData.metadata.episodeId || 0,
-              animeTitle: cachedData.metadata.animeTitle || '',
-              episodeTitle: cachedData.metadata.episodeTitle || '',
-              searchKeyword: cachedData.metadata.searchKeyword,
-              danmakuCount: cachedData.metadata.danmakuCount || cachedData.comments.length,
-            });
-          }
 
           // 如果弹幕插件还未初始化，等待初始化
           if (!danmakuPluginRef.current) {
@@ -698,6 +729,25 @@ function PlayPageClient() {
             }
           }
 
+          // 应用弹幕数量限制
+          const maxCount = typeof window !== 'undefined' ? parseInt(localStorage.getItem('danmakuMaxCount') || '0', 10) : 0;
+          let calculatedOriginalCount = 0;
+          if (maxCount > 0 && danmakuData.length > maxCount) {
+            const originalCount = danmakuData.length;
+            const step = danmakuData.length / maxCount;
+            const limitedData = [];
+            for (let i = 0; i < maxCount; i++) {
+              limitedData.push(danmakuData[Math.floor(i * step)]);
+            }
+            danmakuData = limitedData;
+            calculatedOriginalCount = originalCount;
+            setDanmakuOriginalCount(originalCount);
+            console.log(`弹幕数量限制: 原始 ${originalCount} 条，限制到 ${danmakuData.length} 条`);
+          } else {
+            // 没有应用限制，不显示原始数量
+            setDanmakuOriginalCount(0);
+          }
+
           // 加载弹幕到插件
           const currentSettings = danmakuSettingsRef.current;
           danmakuPluginRef.current.config({
@@ -720,6 +770,19 @@ function PlayPageClient() {
 
           setDanmakuCount(danmakuData.length);
           console.log(`[弹幕] 缓存加载成功，共 ${danmakuData.length} 条`);
+
+          // 更新当前选择状态（使用实时计算的数量）
+          if (cachedData.metadata) {
+            setCurrentDanmakuSelection({
+              animeId: cachedData.metadata.animeId || 0,
+              episodeId: cachedData.metadata.episodeId || 0,
+              animeTitle: cachedData.metadata.animeTitle || '',
+              episodeTitle: cachedData.metadata.episodeTitle || '',
+              searchKeyword: cachedData.metadata.searchKeyword,
+              danmakuCount: danmakuData.length,
+              danmakuOriginalCount: calculatedOriginalCount > 0 ? calculatedOriginalCount : undefined,
+            });
+          }
 
           await new Promise((resolve) => setTimeout(resolve, 1500));
           setDanmakuLoading(false);
@@ -917,11 +980,19 @@ function PlayPageClient() {
     };
 
     loadDanmakuForCurrentEpisode();
-  }, [currentEpisodeIndex, videoTitle, loading]);
+  }, [currentEpisodeIndex, videoTitle, loading, isDirectPlay]);
 
   // 获取豆瓣评分数据
   useEffect(() => {
     const fetchDoubanRating = async () => {
+      if (isDirectPlay) {
+        setDoubanRating(null);
+        setDoubanCardSubtitle('');
+        setDoubanAka([]);
+        setDoubanYear('');
+        return;
+      }
+
       if (!videoDoubanId || videoDoubanId === 0) {
         setDoubanRating(null);
         setDoubanCardSubtitle('');
@@ -973,11 +1044,16 @@ function PlayPageClient() {
     };
 
     fetchDoubanRating();
-  }, [videoDoubanId]);
+  }, [videoDoubanId, isDirectPlay]);
 
   // 获取TMDB背景图
   useEffect(() => {
     const fetchTMDBBackdrop = async () => {
+      if (isDirectPlay) {
+        setTmdbBackdrop(null);
+        return;
+      }
+
       // 检查是否禁用背景图
       if (typeof window !== 'undefined') {
         const disabled = localStorage.getItem('tmdb_backdrop_disabled');
@@ -1125,7 +1201,7 @@ function PlayPageClient() {
     };
 
     fetchTMDBBackdrop();
-  }, [videoTitle, videoDoubanId]);
+  }, [videoTitle, videoDoubanId, isDirectPlay]);
 
 
   // 视频播放地址
@@ -1147,6 +1223,14 @@ function PlayPageClient() {
 
   // 总集数
   const totalEpisodes = detail?.episodes?.length || 0;
+  const directEpisodeLabel = detail?.episodes_titles?.[currentEpisodeIndex] || '直链';
+  const shouldShowEpisodeLabel = totalEpisodes > 1 || isDirectPlay;
+  const episodeLabel = isDirectPlay
+    ? directEpisodeLabel
+    : detail?.episodes_titles?.[currentEpisodeIndex] || `第 ${currentEpisodeIndex + 1} 集`;
+  const playerEpisodeLabel = isDirectPlay
+    ? directEpisodeLabel
+    : `第${currentEpisodeIndex + 1}集`;
 
   // 用于记录是否需要在播放器 ready 后跳转到指定进度
   const resumeTimeRef = useRef<number | null>(null);
@@ -1275,6 +1359,22 @@ function PlayPageClient() {
   ): Promise<SearchResult> => {
     if (sources.length === 1) return sources[0];
 
+    // 获取配置以获取权重信息
+    let weightMap = new Map<string, number>();
+    try {
+      const configResponse = await fetch('/api/admin/config');
+      if (configResponse.ok) {
+        const configData = await configResponse.json();
+        if (configData.Config?.SourceConfig) {
+          configData.Config.SourceConfig.forEach((source: any) => {
+            weightMap.set(source.key, source.weight ?? 0);
+          });
+        }
+      }
+    } catch (error) {
+      console.warn('获取配置失败，权重将使用默认值0:', error);
+    }
+
     // 将播放源均分为两批，并发测速各批，避免一次性过多请求
     const batchSize = Math.ceil(sources.length / 2);
     const allResults: Array<{
@@ -1341,9 +1441,15 @@ function PlayPageClient() {
 
     setPrecomputedVideoInfo(newVideoInfoMap);
 
+    // 如果所有测速都失败，仍然按权重排序返回
     if (successfulResults.length === 0) {
-      console.warn('所有播放源测速都失败，使用第一个播放源');
-      return sources[0];
+      console.warn('所有播放源测速都失败，按权重排序');
+      const sortedByWeight = [...sources].sort((a, b) => {
+        const weightA = weightMap.get(a.source) ?? 0;
+        const weightB = weightMap.get(b.source) ?? 0;
+        return weightB - weightA;
+      });
+      return sortedByWeight[0];
     }
 
     // 找出所有有效速度的最大值，用于线性映射
@@ -1378,7 +1484,8 @@ function PlayPageClient() {
         result.testResult,
         maxSpeed,
         minPing,
-        maxPing
+        maxPing,
+        weightMap.get(result.source.source) ?? 0
       ),
     }));
 
@@ -1408,7 +1515,8 @@ function PlayPageClient() {
     },
     maxSpeed: number,
     minPing: number,
-    maxPing: number
+    maxPing: number,
+    weight: number = 0
   ): number => {
     let score = 0;
 
@@ -1466,6 +1574,9 @@ function PlayPageClient() {
     })();
     score += pingScore * 0.2;
 
+    // 权重加分 - 直接加到总分上（0-100分）
+    score += weight;
+
     return Math.round(score * 100) / 100; // 保留两位小数
   };
 
@@ -1504,7 +1615,7 @@ function PlayPageClient() {
   const refreshXiaoyaUrl = async (
     hls: any,
     video: HTMLVideoElement,
-    isScheduled: boolean = false
+    isScheduled = false
   ) => {
     // 防抖：距离上次刷新不足3秒则不刷新
     const now = Date.now();
@@ -1731,19 +1842,13 @@ function PlayPageClient() {
     clearRefreshTimer(); // 清除旧的定时器
     isInitialLoadRef.current = true; // 重置为首次加载
 
-    // 动态设置 referrer policy：只在小雅源时不发送 Referer
+    // 动态设置 referrer policy：不发送 Referer
     const existingMeta = document.querySelector('meta[name="referrer"]');
-    if (detailData?.source === 'xiaoya') {
-      if (!existingMeta) {
-        const meta = document.createElement('meta');
-        meta.name = 'referrer';
-        meta.content = 'no-referrer';
-        document.head.appendChild(meta);
-      }
-    } else {
-      if (existingMeta) {
-        existingMeta.remove();
-      }
+    if (!existingMeta) {
+      const meta = document.createElement('meta');
+      meta.name = 'referrer';
+      meta.content = 'no-referrer';
+      document.head.appendChild(meta);
     }
 
     if (
@@ -2471,37 +2576,51 @@ function PlayPageClient() {
     // 默认去广告规则
     if (!m3u8Content) return '';
 
+    // 广告关键字列表
+    const adKeywords = [
+      'sponsor',
+      '/ad/',
+      '/ads/',
+      'advert',
+      'advertisement',
+      '/adjump',
+      'redtraffic'
+    ];
+
     // 按行分割M3U8内容
     const lines = m3u8Content.split('\n');
     const filteredLines = [];
 
-    let nextdelete = false;
-    for (let i = 0; i < lines.length; i++) {
+    let i = 0;
+    while (i < lines.length) {
       const line = lines[i];
 
-      if (nextdelete) {
-        nextdelete = false;
+      // 跳过 #EXT-X-DISCONTINUITY 标识
+      if (line.includes('#EXT-X-DISCONTINUITY')) {
+        i++;
         continue;
       }
 
-      // 只过滤#EXT-X-DISCONTINUITY标识
-      if (!line.includes('#EXT-X-DISCONTINUITY')) {
-        if (
-          type == 'ruyi' &&
-          (line.includes('EXTINF:5.640000') ||
-            line.includes('EXTINF:2.960000') ||
-            line.includes('EXTINF:3.480000') ||
-            line.includes('EXTINF:4.000000') ||
-            line.includes('EXTINF:0.960000') ||
-            line.includes('EXTINF:10.000000') ||
-            line.includes('EXTINF:1.266667'))
-        ) {
-          nextdelete = true;
-          continue;
-        }
+      // 如果是 EXTINF 行，检查下一行 URL 是否包含广告关键字
+      if (line.includes('#EXTINF:')) {
+        // 检查下一行 URL 是否包含广告关键字
+        if (i + 1 < lines.length) {
+          const nextLine = lines[i + 1];
+          const containsAdKeyword = adKeywords.some(keyword =>
+            nextLine.toLowerCase().includes(keyword.toLowerCase())
+          );
 
-        filteredLines.push(line);
+          if (containsAdKeyword) {
+            // 跳过 EXTINF 行和 URL 行
+            i += 2;
+            continue;
+          }
+        }
       }
+
+      // 保留当前行
+      filteredLines.push(line);
+      i++;
     }
 
     return filteredLines.join('\n');
@@ -2773,6 +2892,73 @@ function PlayPageClient() {
     };
 
     const initAll = async () => {
+      if (currentSource === 'directplay') {
+        if (!currentId) {
+          setError('缺少直链地址');
+          setLoading(false);
+          return;
+        }
+
+        setLoading(true);
+        setLoadingStage('fetching');
+        setLoadingMessage('🎬 正在准备直链播放...');
+
+        let directUrl = '';
+        try {
+          directUrl = base58Decode(currentId);
+        } catch (decodeError) {
+          console.error('直链地址解析失败:', decodeError);
+          setError('直链地址解析失败');
+          setLoading(false);
+          return;
+        }
+
+        const directDetail: SearchResult = {
+          id: currentId,
+          title: '直链播放',
+          poster: '',
+          episodes: [directUrl],
+          episodes_titles: ['直链'],
+          source: 'directplay',
+          source_name: '直链',
+          class: '',
+          year: '',
+          desc: '',
+          type_name: '',
+          douban_id: 0,
+        };
+
+        setNeedPrefer(false);
+        setCurrentSource('directplay');
+        setCurrentId(currentId);
+        setVideoTitle('直链播放');
+        setVideoYear('');
+        setVideoCover('');
+        setVideoDoubanId(0);
+        setCorrectedDesc('');
+        setDetail(directDetail);
+        setSourceProxyMode(false);
+        setAvailableSources([directDetail]);
+        setCurrentEpisodeIndex(0);
+        setSourceSearchError(null);
+        setSourceSearchLoading(false);
+        setBackgroundSourcesLoading(false);
+
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.set('source', 'directplay');
+        newUrl.searchParams.set('id', currentId);
+        newUrl.searchParams.delete('prefer');
+        newUrl.searchParams.delete('fileName');
+        window.history.replaceState({}, '', newUrl.toString());
+
+        setLoadingStage('ready');
+        setLoadingMessage('✨ 准备就绪，即将开始播放...');
+        setTimeout(() => {
+          setLoading(false);
+        }, 500);
+        return;
+      }
+
       if (!currentSource && !currentId && !videoTitle && !searchTitle) {
         setError('缺少必要参数');
         setLoading(false);
@@ -3595,6 +3781,24 @@ function PlayPageClient() {
         }
       }
 
+      // 应用弹幕数量限制
+      const maxCount = typeof window !== 'undefined' ? parseInt(localStorage.getItem('danmakuMaxCount') || '0', 10) : 0;
+      let calculatedOriginalCount = 0;
+      if (maxCount > 0 && danmakuData.length > maxCount) {
+        const originalCount = danmakuData.length;
+        const step = danmakuData.length / maxCount;
+        const limitedData = [];
+        for (let i = 0; i < maxCount; i++) {
+          limitedData.push(danmakuData[Math.floor(i * step)]);
+        }
+        danmakuData = limitedData;
+        calculatedOriginalCount = originalCount;
+        setDanmakuOriginalCount(originalCount);
+        console.log(`弹幕数量限制: 原始 ${originalCount} 条，限制到 ${danmakuData.length} 条`);
+      } else {
+        setDanmakuOriginalCount(0);
+      }
+
       // 加载弹幕到插件，同时应用当前的弹幕设置
       const currentSettings = danmakuSettingsRef.current;
       danmakuPluginRef.current.config({
@@ -3627,6 +3831,7 @@ function PlayPageClient() {
           episodeTitle: metadata.episodeTitle || '',
           searchKeyword: metadata.searchKeyword,
           danmakuCount: danmakuData.length,
+          danmakuOriginalCount: calculatedOriginalCount > 0 ? calculatedOriginalCount : undefined,
         });
       }
 
@@ -3644,6 +3849,10 @@ function PlayPageClient() {
   // 预加载下一集弹幕（完全复制 loadDanmakuForCurrentEpisode 的逻辑）
   const preloadNextEpisodeDanmaku = async () => {
     try {
+      if (isDirectPlay) return;
+      const disableAutoLoad = localStorage.getItem('disableAutoLoadDanmaku') === 'true';
+      if (disableAutoLoad) return;
+
       const title = videoTitleRef.current;
       if (!title) {
         return;
@@ -3791,6 +4000,22 @@ function PlayPageClient() {
         });
       }
 
+      // 应用弹幕数量限制
+      const maxCount = typeof window !== 'undefined' ? parseInt(localStorage.getItem('danmakuMaxCount') || '0', 10) : 0;
+      if (maxCount > 0 && danmakuData.length > maxCount) {
+        const originalCount = danmakuData.length;
+        const step = danmakuData.length / maxCount;
+        const limitedData = [];
+        for (let i = 0; i < maxCount; i++) {
+          limitedData.push(danmakuData[Math.floor(i * step)]);
+        }
+        danmakuData = limitedData;
+        setDanmakuOriginalCount(originalCount);
+        console.log(`弹幕数量限制: 原始 ${originalCount} 条，限制到 ${danmakuData.length} 条`);
+      } else {
+        setDanmakuOriginalCount(0);
+      }
+
       // 加载弹幕到播放器（使用 reset 方法清空，不触发显示/隐藏事件）
       if (danmakuPluginRef.current) {
         danmakuPluginRef.current.reset();
@@ -3837,7 +4062,7 @@ function PlayPageClient() {
   };
 
   // 处理弹幕选择
-  const handleDanmakuSelect = async (selection: DanmakuSelection, isManual: boolean = false) => {
+  const handleDanmakuSelect = async (selection: DanmakuSelection, isManual = false) => {
     console.log(`[弹幕选择] isManual=${isManual}, selection:`, selection);
     setCurrentDanmakuSelection(selection);
 
@@ -3870,7 +4095,7 @@ function PlayPageClient() {
   };
 
   // 处理用户选择弹幕源
-  const handleDanmakuSourceSelect = async (selectedAnime: DanmakuAnime, selectedIndex?: number, isManualSearch: boolean = false) => {
+  const handleDanmakuSourceSelect = async (selectedAnime: DanmakuAnime, selectedIndex?: number, isManualSearch = false) => {
     setShowDanmakuSourceSelector(false);
 
     try {
@@ -3970,6 +4195,10 @@ function PlayPageClient() {
 
   // 自动搜索并加载弹幕
   const autoSearchDanmaku = async () => {
+    if (isDirectPlay) return;
+    const disableAutoLoad = localStorage.getItem('disableAutoLoadDanmaku') === 'true';
+    if (disableAutoLoad) return;
+
     const title = videoTitleRef.current;
     if (!title) {
       console.warn('视频标题为空，无法自动搜索弹幕');
@@ -3984,18 +4213,6 @@ function PlayPageClient() {
       const cachedData = await getDanmakuFromCache(title, currentEpisodeIndex);
       if (cachedData && cachedData.comments.length > 0) {
         console.log(`[弹幕] 使用缓存: title="${title}", episodeIndex=${currentEpisodeIndex}, 数量=${cachedData.comments.length}`);
-
-        // 如果缓存中有元信息，更新当前选择状态
-        if (cachedData.metadata) {
-          setCurrentDanmakuSelection({
-            animeId: cachedData.metadata.animeId || 0,
-            episodeId: cachedData.metadata.episodeId || 0,
-            animeTitle: cachedData.metadata.animeTitle || '',
-            episodeTitle: cachedData.metadata.episodeTitle || '',
-            searchKeyword: cachedData.metadata.searchKeyword,
-            danmakuCount: cachedData.metadata.danmakuCount || cachedData.comments.length,
-          });
-        }
 
         // 直接加载缓存的弹幕，不需要调用 API
         if (!danmakuPluginRef.current) {
@@ -4037,6 +4254,25 @@ function PlayPageClient() {
           }
         }
 
+        // 应用弹幕数量限制
+        const maxCount = typeof window !== 'undefined' ? parseInt(localStorage.getItem('danmakuMaxCount') || '0', 10) : 0;
+        let calculatedOriginalCount = 0;
+        if (maxCount > 0 && danmakuData.length > maxCount) {
+          const originalCount = danmakuData.length;
+          const step = danmakuData.length / maxCount;
+          const limitedData = [];
+          for (let i = 0; i < maxCount; i++) {
+            limitedData.push(danmakuData[Math.floor(i * step)]);
+          }
+          danmakuData = limitedData;
+          calculatedOriginalCount = originalCount;
+          setDanmakuOriginalCount(originalCount);
+          console.log(`弹幕数量限制: 原始 ${originalCount} 条，限制到 ${danmakuData.length} 条`);
+        } else {
+          // 没有应用限制，不显示原始数量
+          setDanmakuOriginalCount(0);
+        }
+
         // 加载弹幕到插件
         const currentSettings = danmakuSettingsRef.current;
         danmakuPluginRef.current.config({
@@ -4064,6 +4300,19 @@ function PlayPageClient() {
 
         setDanmakuCount(danmakuData.length);
         console.log(`[弹幕] 缓存加载成功，共 ${danmakuData.length} 条`);
+
+        // 更新当前选择状态（使用实时计算的数量）
+        if (cachedData.metadata) {
+          setCurrentDanmakuSelection({
+            animeId: cachedData.metadata.animeId || 0,
+            episodeId: cachedData.metadata.episodeId || 0,
+            animeTitle: cachedData.metadata.animeTitle || '',
+            episodeTitle: cachedData.metadata.episodeTitle || '',
+            searchKeyword: cachedData.metadata.searchKeyword,
+            danmakuCount: danmakuData.length,
+            danmakuOriginalCount: calculatedOriginalCount > 0 ? calculatedOriginalCount : undefined,
+          });
+        }
 
         // 延迟一下让用户看到弹幕数量
         await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -4520,9 +4769,7 @@ function PlayPageClient() {
     // 非WebKit浏览器且播放器已存在，使用switch方法切换
     if (!isWebkit && artPlayerRef.current) {
       artPlayerRef.current.switch = videoUrl;
-      artPlayerRef.current.title = `${videoTitle} - 第${
-        currentEpisodeIndex + 1
-      }集`;
+      artPlayerRef.current.title = `${videoTitle} - ${playerEpisodeLabel}`;
       artPlayerRef.current.poster = videoCover;
       if (artPlayerRef.current?.video) {
         ensureVideoSource(
@@ -4631,7 +4878,7 @@ function PlayPageClient() {
         moreVideoAttr: {
           playsInline: true,
           'webkit-playsinline': 'true',
-          ...(detail?.source === 'xiaoya' ? { referrerpolicy: 'no-referrer' } : {}),
+          referrerpolicy: 'no-referrer',
         } as any,
         // HLS 支持配置
         customType: {
@@ -4766,12 +5013,14 @@ function PlayPageClient() {
                       return;
                     }
                     // 检查其他 HTTP 错误状态码
-                    const statusCode = data.response?.code || data.response?.status;
-                    if (statusCode && statusCode >= 400) {
-                      console.log(`HTTP ${statusCode} 错误`);
-                      hls.destroy();
-                      setVideoError(`HTTP ${statusCode} 错误`);
-                      return;
+                    {
+                      const statusCode = data.response?.code || data.response?.status;
+                      if (statusCode && statusCode >= 400) {
+                        console.log(`HTTP ${statusCode} 错误`);
+                        hls.destroy();
+                        setVideoError(`HTTP ${statusCode} 错误`);
+                        return;
+                      }
                     }
                     console.log('网络错误，尝试恢复...');
                     hls.startLoad();
@@ -4886,8 +5135,8 @@ function PlayPageClient() {
               return '打开设置';
             },
           },
-          // 热力图开关（始终显示，不再依赖 danmakuHeatmapDisabled）
-          {
+          // 热力图开关（仅在未禁用时显示）
+          ...(!danmakuHeatmapDisabledRef.current ? [{
             name: '弹幕热力',
             html: '弹幕热力',
             icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z" fill="#ffffff"/></svg>',
@@ -4903,7 +5152,7 @@ function PlayPageClient() {
               }
               return newVal;
             },
-          },
+          }] : []),
           ...(webGPUSupported ? [
             {
               name: 'Anime4K超分',
@@ -6556,7 +6805,7 @@ function PlayPageClient() {
 
     // 调用异步初始化函数
     initPlayer();
-  }, [videoUrl, loading, blockAdEnabled, currentEpisodeIndex]);
+  }, [videoUrl, loading, blockAdEnabled]);
 
   // 当组件卸载时清理定时器、Wake Lock 和播放器资源
   useEffect(() => {
@@ -6895,12 +7144,9 @@ function PlayPageClient() {
           <h1 className={`text-xl font-semibold flex items-center gap-2 flex-wrap ${tmdbBackdrop ? 'text-white' : 'text-gray-900 dark:text-gray-100'}`}>
             <span>
               {videoTitle || '影片标题'}
-              {totalEpisodes > 1 && (
+              {shouldShowEpisodeLabel && (
                 <span className={tmdbBackdrop ? 'text-white opacity-80' : 'text-gray-500 dark:text-gray-400'}>
-                  {` > ${
-                    detail?.episodes_titles?.[currentEpisodeIndex] ||
-                    `第 ${currentEpisodeIndex + 1} 集`
-                  }`}
+                  {` > ${episodeLabel}`}
                 </span>
               )}
             </span>
@@ -7094,7 +7340,10 @@ function PlayPageClient() {
                           />
                         </svg>
                         <span className='text-sm font-medium text-green-400'>
-                          已加载 {danmakuCount} 条弹幕
+                          {danmakuOriginalCount > 0
+                            ? `已加载 ${danmakuCount} 条弹幕（原始 ${danmakuOriginalCount} 条）`
+                            : `已加载 ${danmakuCount} 条弹幕`
+                          }
                         </span>
                       </>
                     ) : (
@@ -7198,6 +7447,37 @@ function PlayPageClient() {
                           </svg>
                           <span className='hidden lg:inline max-w-0 group-hover:max-w-[100px] overflow-hidden whitespace-nowrap transition-all duration-200 ease-in-out text-white'>
                             复制链接
+                          </span>
+                        </button>
+
+                        {/* App打开 */}
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            // 获取当前浏览器URL去除域名部分，并去除开头的/
+                            const currentPath = (window.location.pathname + window.location.search).replace(/^\//, '');
+                            // 打开moontvplus协议
+                            window.open(`moontvplus://${currentPath}`, '_blank');
+                          }}
+                          className='group relative flex items-center justify-center gap-1 w-8 h-8 lg:w-auto lg:h-auto lg:px-2 lg:py-1.5 bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 text-xs font-medium rounded-md transition-all duration-200 shadow-sm hover:shadow-md cursor-pointer overflow-hidden border border-blue-600 dark:border-blue-700 flex-shrink-0'
+                          title='App打开'
+                        >
+                          <svg
+                            className='w-4 h-4 flex-shrink-0 text-white'
+                            fill='none'
+                            stroke='currentColor'
+                            viewBox='0 0 24 24'
+                            xmlns='http://www.w3.org/2000/svg'
+                          >
+                            <path
+                              strokeLinecap='round'
+                              strokeLinejoin='round'
+                              strokeWidth={2}
+                              d='M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z'
+                            />
+                          </svg>
+                          <span className='hidden lg:inline max-w-0 group-hover:max-w-[100px] overflow-hidden whitespace-nowrap transition-all duration-200 ease-in-out text-white'>
+                            App打开
                           </span>
                         </button>
 
@@ -7467,254 +7747,258 @@ function PlayPageClient() {
           </div>
         </div>
 
-        {/* 详情展示 */}
-        <div className='grid grid-cols-1 md:grid-cols-5 lg:grid-cols-6 gap-4'>
-          {/* 文字区 */}
-          <div className='md:col-span-4 lg:col-span-5'>
-            <div className='p-6 flex flex-col min-h-0'>
-              {/* 标题 */}
-              <h1 className={`text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full flex-wrap gap-2 ${tmdbBackdrop ? 'text-white' : 'text-gray-900 dark:text-gray-100'}`}>
-                <span className={doubanAka.length > 0 ? 'relative group cursor-help' : ''}>
-                  {videoTitle || '影片标题'}
-                  {/* aka 悬浮提示 */}
-                  {doubanAka.length > 0 && (
-                    <div className='absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 dark:bg-gray-900 text-white text-sm rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 ease-out whitespace-nowrap z-[100] pointer-events-none'>
-                      <div className='font-semibold text-xs text-gray-400 mb-1'>又名：</div>
-                      {doubanAka.map((name, index) => (
-                        <div key={index} className='text-sm'>
-                          {name}
+        {!isDirectPlay && (
+          <>
+            {/* 详情展示 */}
+            <div className='grid grid-cols-1 md:grid-cols-5 lg:grid-cols-6 gap-4'>
+              {/* 文字区 */}
+              <div className='md:col-span-4 lg:col-span-5'>
+                <div className='p-6 flex flex-col min-h-0'>
+                  {/* 标题 */}
+                  <h1 className={`text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full flex-wrap gap-2 ${tmdbBackdrop ? 'text-white' : 'text-gray-900 dark:text-gray-100'}`}>
+                    <span className={doubanAka.length > 0 ? 'relative group cursor-help' : ''}>
+                      {videoTitle || '影片标题'}
+                      {/* aka 悬浮提示 */}
+                      {doubanAka.length > 0 && (
+                        <div className='absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 dark:bg-gray-900 text-white text-sm rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 ease-out whitespace-nowrap z-[100] pointer-events-none'>
+                          <div className='font-semibold text-xs text-gray-400 mb-1'>又名：</div>
+                          {doubanAka.map((name, index) => (
+                            <div key={index} className='text-sm'>
+                              {name}
+                            </div>
+                          ))}
+                          <div className='absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800 dark:border-t-gray-900'></div>
                         </div>
-                      ))}
-                      <div className='absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800 dark:border-t-gray-900'></div>
-                    </div>
-                  )}
-                </span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleToggleFavorite();
-                  }}
-                  className='flex-shrink-0 hover:opacity-80 transition-opacity'
-                >
-                  <FavoriteIcon filled={favorited} />
-                </button>
-                {/* 网盘搜索按钮 */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowPansouDialog(true);
-                  }}
-                  className='flex-shrink-0 hover:opacity-80 transition-opacity'
-                  title='搜索网盘资源'
-                >
-                  <Cloud className='h-6 w-6 text-gray-700 dark:text-gray-300' />
-                </button>
-                {/* AI问片按钮 */}
-                {aiEnabled && detail && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowAIChat(true);
-                    }}
-                    className='flex-shrink-0 hover:opacity-80 transition-opacity'
-                    title='AI问片'
-                  >
-                    <Sparkles className='h-6 w-6 text-gray-700 dark:text-gray-300' />
-                  </button>
-                )}
-                {/* 纠错按钮 - 仅小雅源显示 */}
-                {detail && detail.source === 'xiaoya' && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowCorrectDialog(true);
-                    }}
-                    className='flex-shrink-0 hover:opacity-80 transition-opacity'
-                    title='纠错'
-                  >
-                    <AlertCircle className='h-6 w-6 text-gray-700 dark:text-gray-300' />
-                  </button>
-                )}
-                {/* 豆瓣评分显示 */}
-                {doubanRating && doubanRating.value > 0 && (
-                  <div className='flex items-center gap-2 text-base font-normal'>
-                    {/* 星级显示 */}
-                    <div className='flex items-center gap-1'>
-                      {[1, 2, 3, 4, 5].map((star) => {
-                        const starValue = doubanRating.value / 2; // 转换为5星制
-                        const isFullStar = star <= Math.floor(starValue);
-                        const isHalfStar = !isFullStar && star <= Math.ceil(starValue) && starValue % 1 >= 0.25;
-
-                        return (
-                          <div key={star} className='relative w-5 h-5'>
-                            {isFullStar ? (
-                              // 全星
-                              <svg
-                                className='w-5 h-5 text-yellow-400 fill-yellow-400'
-                                viewBox='0 0 24 24'
-                                xmlns='http://www.w3.org/2000/svg'
-                              >
-                                <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
-                              </svg>
-                            ) : isHalfStar ? (
-                              // 半星
-                              <>
-                                {/* 空星背景 */}
-                                <svg
-                                  className='absolute w-5 h-5 text-gray-300 dark:text-gray-600 fill-gray-300 dark:fill-gray-600'
-                                  viewBox='0 0 24 24'
-                                  xmlns='http://www.w3.org/2000/svg'
-                                >
-                                  <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
-                                </svg>
-                                {/* 半星遮罩 */}
-                                <svg
-                                  className='absolute w-5 h-5 text-yellow-400 fill-yellow-400'
-                                  viewBox='0 0 24 24'
-                                  xmlns='http://www.w3.org/2000/svg'
-                                  style={{ clipPath: 'inset(0 50% 0 0)' }}
-                                >
-                                  <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
-                                </svg>
-                              </>
-                            ) : (
-                              // 空星
-                              <svg
-                                className='w-5 h-5 text-gray-300 dark:text-gray-600 fill-gray-300 dark:fill-gray-600'
-                                viewBox='0 0 24 24'
-                                xmlns='http://www.w3.org/2000/svg'
-                              >
-                                <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
-                              </svg>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* 评分数值 */}
-                    <span className='text-gray-700 dark:text-gray-300 font-semibold'>
-                      {doubanRating.value.toFixed(1)}
+                      )}
                     </span>
-                    {/* 评分人数 */}
-                    <span className='text-gray-500 dark:text-gray-400 text-sm'>
-                      ({doubanRating.count.toLocaleString()}人评价)
-                    </span>
-                  </div>
-                )}
-              </h1>
-
-              {/* 关键信息行 */}
-              <div className={`flex flex-wrap items-center gap-3 text-base mb-4 opacity-80 flex-shrink-0 ${tmdbBackdrop ? 'text-white' : ''}`}>
-                {detail?.class && (
-                  <span className='text-green-600 font-semibold'>
-                    {detail.class}
-                  </span>
-                )}
-                {/* 优先使用 doubanYear，如果没有则使用 detail.year 或 videoYear */}
-                {(doubanYear || detail?.year || videoYear) && (
-                  <span>{doubanYear || detail?.year || videoYear}</span>
-                )}
-                {detail?.source_name && (
-                  <span className={`border px-2 py-[1px] rounded ${
-                    detail.source === 'xiaoya' ? 'border-blue-500' : detail.source === 'openlist' || detail.source === 'emby' || detail.source?.startsWith('emby_') ? 'border-yellow-500' : 'border-gray-500/60'
-                  }`}>
-                    {detail.source_name}
-                  </span>
-                )}
-                {detail?.type_name && <span>{detail.type_name}</span>}
-              </div>
-              {/* 剧情简介 */}
-              {(doubanCardSubtitle || correctedDesc || detail?.desc) && (
-                <div
-                  className={`mt-0 text-base leading-relaxed opacity-90 overflow-y-auto pr-2 flex-1 min-h-0 scrollbar-hide ${tmdbBackdrop ? 'text-white' : ''}`}
-                  style={{ whiteSpace: 'pre-line' }}
-                >
-                  {/* card_subtitle 在前，desc 在后 */}
-                  {doubanCardSubtitle && (
-                    <div className='mb-3 pb-3 border-b border-gray-300 dark:border-gray-700'>
-                      {doubanCardSubtitle}
-                    </div>
-                  )}
-                  {correctedDesc || detail?.desc}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 封面展示 */}
-          <div className='hidden md:block md:col-span-1 md:order-first'>
-            <div className='pl-0 py-4 pr-6 max-w-sm mx-auto'>
-              <div className='relative bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden'>
-                {videoCover ? (
-                  <>
-                    <img
-                      src={processImageUrl(videoCover)}
-                      alt={videoTitle}
-                      className='w-full h-full object-cover'
-                    />
-
-                    {/* 豆瓣链接按钮 */}
-                    {videoDoubanId !== 0 && (
-                      <a
-                        href={`https://movie.douban.com/subject/${videoDoubanId.toString()}`}
-                        target='_blank'
-                        rel='noopener noreferrer'
-                        className='absolute top-3 left-3'
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleFavorite();
+                      }}
+                      className='flex-shrink-0 hover:opacity-80 transition-opacity'
+                    >
+                      <FavoriteIcon filled={favorited} />
+                    </button>
+                    {/* 网盘搜索按钮 */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowPansouDialog(true);
+                      }}
+                      className='flex-shrink-0 hover:opacity-80 transition-opacity'
+                      title='搜索网盘资源'
+                    >
+                      <Cloud className='h-6 w-6 text-gray-700 dark:text-gray-300' />
+                    </button>
+                    {/* AI问片按钮 */}
+                    {aiEnabled && detail && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowAIChat(true);
+                        }}
+                        className='flex-shrink-0 hover:opacity-80 transition-opacity'
+                        title='AI问片'
                       >
-                        <div className='bg-green-500 text-white text-xs font-bold w-8 h-8 rounded-full flex items-center justify-center shadow-md hover:bg-green-600 hover:scale-[1.1] transition-all duration-300 ease-out'>
-                          <svg
-                            width='16'
-                            height='16'
-                            viewBox='0 0 24 24'
-                            fill='none'
-                            stroke='currentColor'
-                            strokeWidth='2'
-                            strokeLinecap='round'
-                            strokeLinejoin='round'
-                          >
-                            <path d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'></path>
-                            <path d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'></path>
-                          </svg>
-                        </div>
-                      </a>
+                        <Sparkles className='h-6 w-6 text-gray-700 dark:text-gray-300' />
+                      </button>
                     )}
-                  </>
-                ) : (
-                  <span className='text-gray-600 dark:text-gray-400'>
-                    封面图片
-                  </span>
-                )}
+                    {/* 纠错按钮 - 仅小雅源显示 */}
+                    {detail && detail.source === 'xiaoya' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowCorrectDialog(true);
+                        }}
+                        className='flex-shrink-0 hover:opacity-80 transition-opacity'
+                        title='纠错'
+                      >
+                        <AlertCircle className='h-6 w-6 text-gray-700 dark:text-gray-300' />
+                      </button>
+                    )}
+                    {/* 豆瓣评分显示 */}
+                    {doubanRating && doubanRating.value > 0 && (
+                      <div className='flex items-center gap-2 text-base font-normal'>
+                        {/* 星级显示 */}
+                        <div className='flex items-center gap-1'>
+                          {[1, 2, 3, 4, 5].map((star) => {
+                            const starValue = doubanRating.value / 2; // 转换为5星制
+                            const isFullStar = star <= Math.floor(starValue);
+                            const isHalfStar = !isFullStar && star <= Math.ceil(starValue) && starValue % 1 >= 0.25;
+
+                            return (
+                              <div key={star} className='relative w-5 h-5'>
+                                {isFullStar ? (
+                                  // 全星
+                                  <svg
+                                    className='w-5 h-5 text-yellow-400 fill-yellow-400'
+                                    viewBox='0 0 24 24'
+                                    xmlns='http://www.w3.org/2000/svg'
+                                  >
+                                    <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
+                                  </svg>
+                                ) : isHalfStar ? (
+                                  // 半星
+                                  <>
+                                    {/* 空星背景 */}
+                                    <svg
+                                      className='absolute w-5 h-5 text-gray-300 dark:text-gray-600 fill-gray-300 dark:fill-gray-600'
+                                      viewBox='0 0 24 24'
+                                      xmlns='http://www.w3.org/2000/svg'
+                                    >
+                                      <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
+                                    </svg>
+                                    {/* 半星遮罩 */}
+                                    <svg
+                                      className='absolute w-5 h-5 text-yellow-400 fill-yellow-400'
+                                      viewBox='0 0 24 24'
+                                      xmlns='http://www.w3.org/2000/svg'
+                                      style={{ clipPath: 'inset(0 50% 0 0)' }}
+                                    >
+                                      <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
+                                    </svg>
+                                  </>
+                                ) : (
+                                  // 空星
+                                  <svg
+                                    className='w-5 h-5 text-gray-300 dark:text-gray-600 fill-gray-300 dark:fill-gray-600'
+                                    viewBox='0 0 24 24'
+                                    xmlns='http://www.w3.org/2000/svg'
+                                  >
+                                    <path d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' />
+                                  </svg>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {/* 评分数值 */}
+                        <span className='text-gray-700 dark:text-gray-300 font-semibold'>
+                          {doubanRating.value.toFixed(1)}
+                        </span>
+                        {/* 评分人数 */}
+                        <span className='text-gray-500 dark:text-gray-400 text-sm'>
+                          ({doubanRating.count.toLocaleString()}人评价)
+                        </span>
+                      </div>
+                    )}
+                  </h1>
+
+                  {/* 关键信息行 */}
+                  <div className={`flex flex-wrap items-center gap-3 text-base mb-4 opacity-80 flex-shrink-0 ${tmdbBackdrop ? 'text-white' : ''}`}>
+                    {detail?.class && (
+                      <span className='text-green-600 font-semibold'>
+                        {detail.class}
+                      </span>
+                    )}
+                    {/* 优先使用 doubanYear，如果没有则使用 detail.year 或 videoYear */}
+                    {(doubanYear || detail?.year || videoYear) && (
+                      <span>{doubanYear || detail?.year || videoYear}</span>
+                    )}
+                    {detail?.source_name && (
+                      <span className={`border px-2 py-[1px] rounded ${
+                        detail.source === 'xiaoya' ? 'border-blue-500' : detail.source === 'openlist' || detail.source === 'emby' || detail.source?.startsWith('emby_') ? 'border-yellow-500' : 'border-gray-500/60'
+                      }`}>
+                        {detail.source_name}
+                      </span>
+                    )}
+                    {detail?.type_name && <span>{detail.type_name}</span>}
+                  </div>
+                  {/* 剧情简介 */}
+                  {(doubanCardSubtitle || correctedDesc || detail?.desc) && (
+                    <div
+                      className={`mt-0 text-base leading-relaxed opacity-90 overflow-y-auto pr-2 flex-1 min-h-0 scrollbar-hide ${tmdbBackdrop ? 'text-white' : ''}`}
+                      style={{ whiteSpace: 'pre-line' }}
+                    >
+                      {/* card_subtitle 在前，desc 在后 */}
+                      {doubanCardSubtitle && (
+                        <div className='mb-3 pb-3 border-b border-gray-300 dark:border-gray-700'>
+                          {doubanCardSubtitle}
+                        </div>
+                      )}
+                      {correctedDesc || detail?.desc}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 封面展示 */}
+              <div className='hidden md:block md:col-span-1 md:order-first'>
+                <div className='pl-0 py-4 pr-6 max-w-sm mx-auto'>
+                  <div className='relative bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden'>
+                    {videoCover ? (
+                      <>
+                        <img
+                          src={processImageUrl(videoCover)}
+                          alt={videoTitle}
+                          className='w-full h-full object-cover'
+                        />
+
+                        {/* 豆瓣链接按钮 */}
+                        {videoDoubanId !== 0 && (
+                          <a
+                            href={`https://movie.douban.com/subject/${videoDoubanId.toString()}`}
+                            target='_blank'
+                            rel='noopener noreferrer'
+                            className='absolute top-3 left-3'
+                          >
+                            <div className='bg-green-500 text-white text-xs font-bold w-8 h-8 rounded-full flex items-center justify-center shadow-md hover:bg-green-600 hover:scale-[1.1] transition-all duration-300 ease-out'>
+                              <svg
+                                width='16'
+                                height='16'
+                                viewBox='0 0 24 24'
+                                fill='none'
+                                stroke='currentColor'
+                                strokeWidth='2'
+                                strokeLinecap='round'
+                                strokeLinejoin='round'
+                              >
+                                <path d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'></path>
+                                <path d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'></path>
+                              </svg>
+                            </div>
+                          </a>
+                        )}
+                      </>
+                    ) : (
+                      <span className='text-gray-600 dark:text-gray-400'>
+                        封面图片
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
 
-        {/* 推荐区域 */}
-        <SmartRecommendations
-          doubanId={videoDoubanId !== 0 ? videoDoubanId : undefined}
-          videoTitle={videoTitle}
-        />
+            {/* 推荐区域 */}
+            <SmartRecommendations
+              doubanId={videoDoubanId !== 0 ? videoDoubanId : undefined}
+              videoTitle={videoTitle}
+            />
 
-        {/* 豆瓣评论区域 */}
-        {videoDoubanId !== 0 && enableComments && (
-          <div className='mt-6 -mx-3 md:mx-0 md:px-4'>
-            <div className='bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-200/50 dark:border-gray-700/50 overflow-hidden'>
-              {/* 标题 */}
-              <div className='px-3 md:px-6 py-4 border-b border-gray-200 dark:border-gray-700'>
-                <h3 className='text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2'>
-                  <svg className='w-5 h-5' fill='currentColor' viewBox='0 0 24 24'>
-                    <path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z'/>
-                  </svg>
-                  豆瓣评论
-                </h3>
+            {/* 豆瓣评论区域 */}
+            {videoDoubanId !== 0 && enableComments && (
+              <div className='mt-6 -mx-3 md:mx-0 md:px-4'>
+                <div className='bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-200/50 dark:border-gray-700/50 overflow-hidden'>
+                  {/* 标题 */}
+                  <div className='px-3 md:px-6 py-4 border-b border-gray-200 dark:border-gray-700'>
+                    <h3 className='text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2'>
+                      <svg className='w-5 h-5' fill='currentColor' viewBox='0 0 24 24'>
+                        <path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z'/>
+                      </svg>
+                      豆瓣评论
+                    </h3>
+                  </div>
+
+                  {/* 评论内容 */}
+                  <div className='p-3 md:p-6'>
+                    <DoubanComments doubanId={videoDoubanId} />
+                  </div>
+                </div>
               </div>
-
-              {/* 评论内容 */}
-              <div className='p-3 md:p-6'>
-                <DoubanComments doubanId={videoDoubanId} />
-              </div>
-            </div>
-          </div>
+            )}
+          </>
         )}
       </div>
 

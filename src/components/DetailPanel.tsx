@@ -1,11 +1,14 @@
 'use client';
 
-import { X, Calendar, Star, Clock, Tag, Users, Globe, Film } from 'lucide-react';
+import { Calendar, Clock, Film,Globe, Star, Tag, Users, X } from 'lucide-react';
 import Image from 'next/image';
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+
 import { getTMDBImageUrl } from '@/lib/tmdb.client';
 import { processImageUrl } from '@/lib/utils';
+
+import ImageViewer from '@/components/ImageViewer';
 
 interface DetailPanelProps {
   isOpen: boolean;
@@ -90,6 +93,8 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
   const [expandedEpisodes, setExpandedEpisodes] = useState<Set<number>>(new Set());
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
   const [seasonsLoaded, setSeasonsLoaded] = useState(false);
+  const [showImageViewer, setShowImageViewer] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<string>('');
 
   // 拖动滚动状态
   const [isDragging, setIsDragging] = useState(false);
@@ -97,6 +102,12 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
   const [startX, setStartX] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
   const episodesScrollRef = React.useRef<HTMLDivElement>(null);
+
+  // 图片点击处理
+  const handleImageClick = (imageUrl: string) => {
+    setSelectedImage(imageUrl);
+    setShowImageViewer(true);
+  };
 
   // 确保组件在客户端挂载后才渲染 Portal
   useEffect(() => {
@@ -607,7 +618,10 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
               {/* 海报和基本信息 */}
               <div className="flex gap-6 mb-6">
                 {detailData.poster && (
-                  <div className="relative w-32 h-48 rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 flex-shrink-0">
+                  <div
+                    className="relative w-32 h-48 rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 flex-shrink-0 cursor-pointer hover:opacity-90 transition-opacity"
+                    onClick={() => handleImageClick(detailData.poster!)}
+                  >
                     <Image src={detailData.poster} alt={detailData.title} fill className="object-cover" draggable={false} />
                   </div>
                 )}
@@ -787,7 +801,13 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
                                 }`}
                               >
                                 {season.poster_path && (
-                                  <div className="relative w-12 h-16 rounded overflow-hidden bg-gray-200 dark:bg-gray-700 flex-shrink-0">
+                                  <div
+                                    className="relative w-12 h-16 rounded overflow-hidden bg-gray-200 dark:bg-gray-700 flex-shrink-0 hover:opacity-80 transition-opacity"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleImageClick(processImageUrl(getTMDBImageUrl(season.poster_path, 'w500')));
+                                    }}
+                                  >
                                     <Image
                                       src={processImageUrl(getTMDBImageUrl(season.poster_path, 'w92'))}
                                       alt={season.name}
@@ -839,7 +859,10 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
                                     style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
                                   >
                                     {episode.still_path && (
-                                      <div className="relative w-full h-36 rounded overflow-hidden bg-gray-200 dark:bg-gray-700 mb-2">
+                                      <div
+                                        className="relative w-full h-36 rounded overflow-hidden bg-gray-200 dark:bg-gray-700 mb-2 cursor-pointer hover:opacity-90 transition-opacity"
+                                        onClick={() => handleImageClick(processImageUrl(getTMDBImageUrl(episode.still_path, 'w500')))}
+                                      >
                                         <Image
                                           src={processImageUrl(getTMDBImageUrl(episode.still_path, 'w300'))}
                                           alt={episode.name}
@@ -888,6 +911,16 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
           )}
         </div>
       </div>
+
+      {/* 图片查看器 */}
+      {showImageViewer && (
+        <ImageViewer
+          isOpen={showImageViewer}
+          onClose={() => setShowImageViewer(false)}
+          imageUrl={selectedImage}
+          alt={detailData?.title || title}
+        />
+      )}
     </div>
   );
 
